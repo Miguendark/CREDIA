@@ -17,6 +17,22 @@ alter table public.payments enable row level security;
 alter table public.capital_transactions enable row level security;
 alter table public.audit_logs enable row level security;
 
+-- Privilegios base explícitos: no depender de los privilegios por defecto
+-- que Supabase concede al crear una tabla desde su SQL Editor. Si una tabla
+-- se recrea (drop/create) fuera de ese flujo, o el proyecto se levanta en
+-- otro entorno, estos GRANT garantizan que "authenticated" tenga la base
+-- necesaria para los verbos que las políticas de abajo autorizan (las
+-- políticas deciden QUÉ filas; estos GRANT deciden si el verbo aplica en
+-- absoluto). GRANT es idempotente. Los REVOKE puntuales más abajo siguen
+-- siendo los que fuerzan el paso por las funciones RPC de la migración 0005.
+grant select, insert, update on public.users to authenticated;
+grant select, insert, update on public.clients to authenticated;
+grant select, update on public.loans to authenticated;
+grant select on public.installments to authenticated;
+grant select on public.payments to authenticated;
+grant select on public.capital_transactions to authenticated;
+grant select, insert on public.audit_logs to authenticated;
+
 -- =========================================================================
 -- users
 -- =========================================================================

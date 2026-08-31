@@ -2,10 +2,14 @@
 --
 -- Estas funciones son el ÚNICO camino soportado para escribir operaciones
 -- financieras multi-tabla (crear préstamo, registrar pago, mover capital).
--- Corren con SECURITY INVOKER (por defecto): se ejecutan con los permisos
--- del usuario autenticado que llama, así que las políticas RLS (migración 0006)
--- siguen aplicando. Cada función es una sola transacción: si algo falla,
--- Postgres revierte todos los cambios (ver sección 34 del documento de producto).
+-- Corren con SECURITY DEFINER: se ejecutan con los permisos del dueño de la
+-- función (no del usuario autenticado que llama), por eso pueden escribir en
+-- loans/installments/payments/capital_transactions aunque el rol "authenticated"
+-- tenga esos privilegios revocados a nivel de tabla (migración 0006). El
+-- control de acceso de negocio (quién puede ejecutar cada RPC) se hace vía
+-- GRANT/REVOKE EXECUTE sobre las funciones, no vía RLS. Cada función es una
+-- sola transacción: si algo falla, Postgres revierte todos los cambios (ver
+-- sección 34 del documento de producto).
 --
 -- La MATEMÁTICA financiera (cuánto interés, cómo se reparte un pago) vive en
 -- lib/finance/*.ts, no aquí. Estas funciones solo persisten de forma atómica
@@ -32,6 +36,8 @@ create or replace function public.create_loan_with_installments(
 )
 returns public.loans
 language plpgsql
+security definer
+set search_path = public
 as $$
 declare
   v_client public.clients;
@@ -103,6 +109,8 @@ create or replace function public.register_payment(
 )
 returns setof public.payments
 language plpgsql
+security definer
+set search_path = public
 as $$
 declare
   v_loan public.loans;
@@ -153,7 +161,7 @@ begin
     update public.installments set
       amount_paid = amount_paid + v_alloc.amount,
       remaining_amount = greatest(remaining_amount - v_alloc.amount, 0),
-      status = case when remaining_amount - v_alloc.amount <= 0.01 then 'pagada' else 'parcial' end,
+      status = case when remaining_amount - v_alloc.amount <= 0.01 then 'pagada'::public.installment_status else 'parcial'::public.installment_status end,
       paid_at = case when remaining_amount - v_alloc.amount <= 0.01 then now() else paid_at end
       where id = v_installment.id;
 
@@ -210,6 +218,8 @@ create or replace function public.register_capital_movement(
 )
 returns public.capital_transactions
 language plpgsql
+security definer
+set search_path = public
 as $$
 declare
   v_movement public.capital_transactions;
