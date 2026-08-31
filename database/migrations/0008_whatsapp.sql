@@ -42,3 +42,10 @@ create policy whatsapp_conversations_staff on public.whatsapp_conversations
 
 create policy whatsapp_messages_staff on public.whatsapp_messages
   for all using (auth.uid() is not null) with check (auth.uid() is not null);
+
+-- Privilegios base explícitos (ver el mismo razonamiento en 0006): no
+-- depender de los privilegios por defecto que Supabase concede al crear
+-- una tabla desde su SQL Editor. Las políticas "for all" de arriba ya
+-- autorizan las cuatro operaciones a cualquier staff autenticado.
+grant select, insert, update, delete on public.whatsapp_conversations to authenticated;
+grant select, insert, update, delete on public.whatsapp_messages to authenticated;
