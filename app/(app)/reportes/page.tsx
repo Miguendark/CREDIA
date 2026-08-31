@@ -8,7 +8,14 @@ import { getCapitalSummary, listCapitalMovements } from "@/services/capital.serv
 import { getCollectionsBuckets, getDelinquentClients } from "@/services/collections.service"
 import { PageHeader } from "@/components/shared/page-header"
 import { ReportsFilters } from "@/components/reports/reports-filters"
-import { ExportButtons } from "@/components/reports/export-buttons"
+import {
+  CapitalExport,
+  ClientsExport,
+  DelinquencyExport,
+  InterestExport,
+  LoansExport,
+  PaymentsExport,
+} from "@/components/reports/report-exports"
 import { formatCurrency, formatDate } from "@/lib/utils/format"
 
 export const metadata: Metadata = { title: "Reportes" }
@@ -43,133 +50,36 @@ export default async function ReportesPage({
 
       <ReportsFilters />
 
-      <ReportSection
-        title="Reporte de préstamos"
-        exportButtons={
-          <ExportButtons
-            filename="reporte-prestamos.csv"
-            rows={loansResult.items}
-            columns={[
-              { header: "Número", accessor: (r) => r.loan_number },
-              { header: "Cliente", accessor: (r) => r.client.full_name },
-              { header: "Capital", accessor: (r) => r.principal_amount },
-              { header: "Interés", accessor: (r) => r.total_interest },
-              { header: "Total", accessor: (r) => r.total_amount },
-              { header: "Saldo", accessor: (r) => r.outstanding_principal + r.outstanding_interest },
-              { header: "Estado", accessor: (r) => r.status },
-              { header: "Inicio", accessor: (r) => r.start_date },
-            ]}
-          />
-        }
-      >
+      <ReportSection title="Reporte de préstamos" exportButtons={<LoansExport rows={loansResult.items} />}>
         <p className="text-sm text-muted-foreground">{loansResult.total} préstamos en total.</p>
       </ReportSection>
 
-      <ReportSection
-        title="Reporte de pagos"
-        exportButtons={
-          <ExportButtons
-            filename="reporte-pagos.csv"
-            rows={paymentsResult.items}
-            columns={[
-              { header: "Recibo", accessor: (r) => r.payment_number },
-              { header: "Cliente", accessor: (r) => r.client.full_name },
-              { header: "Préstamo", accessor: (r) => r.loan.loan_number },
-              { header: "Monto", accessor: (r) => r.amount },
-              { header: "Capital", accessor: (r) => r.principal_applied },
-              { header: "Interés", accessor: (r) => r.interest_applied },
-              { header: "Método", accessor: (r) => r.payment_method },
-              { header: "Fecha", accessor: (r) => r.payment_date },
-            ]}
-          />
-        }
-      >
+      <ReportSection title="Reporte de pagos" exportButtons={<PaymentsExport rows={paymentsResult.items} />}>
         <p className="text-sm text-muted-foreground">
           {paymentsResult.total} pagos {from || to ? "en el rango seleccionado" : "en total"} por{" "}
           {formatCurrency(paymentsResult.items.reduce((s, p) => s + p.amount, 0))}.
         </p>
       </ReportSection>
 
-      <ReportSection
-        title="Reporte de clientes"
-        exportButtons={
-          <ExportButtons
-            filename="reporte-clientes.csv"
-            rows={clientsResult.items}
-            columns={[
-              { header: "Código", accessor: (r) => r.client_code },
-              { header: "Nombre", accessor: (r) => r.full_name },
-              { header: "Cédula", accessor: (r) => r.identification_number ?? "" },
-              { header: "Teléfono", accessor: (r) => r.phone ?? "" },
-              { header: "Préstamos activos", accessor: (r) => r.active_loans_count },
-              { header: "Saldo pendiente", accessor: (r) => r.outstanding_balance },
-              { header: "Estado", accessor: (r) => r.status },
-              { header: "Registrado", accessor: (r) => r.created_at },
-            ]}
-          />
-        }
-      >
+      <ReportSection title="Reporte de clientes" exportButtons={<ClientsExport rows={clientsResult.items} />}>
         <p className="text-sm text-muted-foreground">{clientsResult.total} clientes registrados.</p>
       </ReportSection>
 
-      <ReportSection
-        title="Reporte de intereses"
-        exportButtons={
-          <ExportButtons
-            filename="reporte-intereses.csv"
-            rows={interestReport}
-            columns={[
-              { header: "Préstamo", accessor: (r) => r.loanNumber },
-              { header: "Cliente", accessor: (r) => r.clientName },
-              { header: "Interés pactado", accessor: (r) => r.interestPactado },
-              { header: "Interés cobrado", accessor: (r) => r.interestCobrado },
-              { header: "Estado", accessor: (r) => r.status },
-            ]}
-          />
-        }
-      >
+      <ReportSection title="Reporte de intereses" exportButtons={<InterestExport rows={interestReport} />}>
         <p className="text-sm text-muted-foreground">
           Pactado {formatCurrency(interestReport.reduce((s, r) => s + r.interestPactado, 0))} · Cobrado{" "}
           {formatCurrency(interestReport.reduce((s, r) => s + r.interestCobrado, 0))}
         </p>
       </ReportSection>
 
-      <ReportSection
-        title="Reporte de morosidad"
-        exportButtons={
-          <ExportButtons
-            filename="reporte-morosidad.csv"
-            rows={delinquentClients}
-            columns={[
-              { header: "Cliente", accessor: (r) => r.full_name },
-              { header: "Código", accessor: (r) => r.client_code },
-              { header: "Cuotas vencidas", accessor: (r) => r.overdueInstallments },
-              { header: "Monto vencido", accessor: (r) => r.overdueAmount },
-            ]}
-          />
-        }
-      >
+      <ReportSection title="Reporte de morosidad" exportButtons={<DelinquencyExport rows={delinquentClients} />}>
         <p className="text-sm text-muted-foreground">
           {delinquentClients.length} clientes morosos por{" "}
           {formatCurrency(delinquentClients.reduce((s, c) => s + c.overdueAmount, 0))}.
         </p>
       </ReportSection>
 
-      <ReportSection
-        title="Reporte de capital"
-        exportButtons={
-          <ExportButtons
-            filename="reporte-capital.csv"
-            rows={capitalMovements.items}
-            columns={[
-              { header: "Fecha", accessor: (r) => r.transaction_date },
-              { header: "Tipo", accessor: (r) => r.type },
-              { header: "Descripción", accessor: (r) => r.description ?? "" },
-              { header: "Monto", accessor: (r) => r.amount },
-            ]}
-          />
-        }
-      >
+      <ReportSection title="Reporte de capital" exportButtons={<CapitalExport rows={capitalMovements.items} />}>
         <p className="text-sm text-muted-foreground">
           Disponible {formatCurrency(capitalSummary.availableCapital)} · Prestado{" "}
           {formatCurrency(capitalSummary.lentCapital)} · {capitalMovements.total} movimientos
