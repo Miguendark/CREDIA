@@ -3,6 +3,7 @@ import Link from "next/link"
 import { Plus, Receipt } from "lucide-react"
 import { createClient } from "@/lib/supabase/server"
 import { listPayments } from "@/services/payments.service"
+import { getCurrentStaffUser } from "@/services/users.service"
 import { PageHeader } from "@/components/shared/page-header"
 import { EmptyState } from "@/components/shared/empty-state"
 import { Pagination } from "@/components/shared/pagination"
@@ -24,13 +25,17 @@ export default async function PagosPage({
   const page = Math.max(1, Number(pageParam) || 1)
   const supabase = await createClient()
 
-  const { items, total } = await listPayments(supabase, {
-    dateFrom: from,
-    dateTo: to,
-    paymentMethod: method as PaymentMethod | undefined,
-    page,
-    pageSize: PAGE_SIZE,
-  })
+  const [{ items, total }, staffUser] = await Promise.all([
+    listPayments(supabase, {
+      dateFrom: from,
+      dateTo: to,
+      paymentMethod: method as PaymentMethod | undefined,
+      page,
+      pageSize: PAGE_SIZE,
+    }),
+    getCurrentStaffUser(supabase),
+  ])
+  const canVoidReceipts = staffUser?.role === "admin" || staffUser?.role === "supervisor"
 
   return (
     <div className="space-y-6">
@@ -53,7 +58,7 @@ export default async function PagosPage({
         <EmptyState icon={Receipt} title="Sin pagos" description="Aún no se han registrado pagos." />
       ) : (
         <>
-          <PaymentsTable items={items} />
+          <PaymentsTable items={items} canVoidReceipts={canVoidReceipts} />
           <Pagination
             page={page}
             pageSize={PAGE_SIZE}

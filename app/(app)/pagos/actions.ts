@@ -6,7 +6,7 @@ import { paymentSchema, type PaymentInput } from "@/lib/validations/payment"
 import * as paymentsService from "@/services/payments.service"
 
 export type PaymentActionResult =
-  | { success: true; unallocatedAmount: number }
+  | { success: true; unallocatedAmount: number; paymentIds: string[] }
   | { success: false; message: string }
 
 export async function registerPaymentAction(input: PaymentInput): Promise<PaymentActionResult> {
@@ -17,7 +17,7 @@ export async function registerPaymentAction(input: PaymentInput): Promise<Paymen
 
   try {
     const supabase = await createSupabaseClient()
-    const { unallocatedAmount } = await paymentsService.registerPayment(supabase, parsed.data)
+    const { payments, unallocatedAmount } = await paymentsService.registerPayment(supabase, parsed.data)
     revalidatePath("/pagos")
     revalidatePath("/prestamos")
     revalidatePath(`/prestamos/${parsed.data.loan_id}`)
@@ -25,7 +25,7 @@ export async function registerPaymentAction(input: PaymentInput): Promise<Paymen
     revalidatePath("/dashboard")
     revalidatePath("/cobros")
     revalidatePath("/capital")
-    return { success: true, unallocatedAmount }
+    return { success: true, unallocatedAmount, paymentIds: payments.map((p) => p.id) }
   } catch (error) {
     return { success: false, message: error instanceof Error ? error.message : "No se pudo registrar el pago" }
   }

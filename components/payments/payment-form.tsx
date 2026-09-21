@@ -33,6 +33,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { ClientCombobox } from "@/components/shared/client-combobox"
+import { ReceiptDialog } from "@/components/payments/receipt-dialog"
 import { paymentSchema, type PaymentInput } from "@/lib/validations/payment"
 import { allocatePayment } from "@/lib/finance/payment-allocator"
 import { formatCurrency, formatDate } from "@/lib/utils/format"
@@ -62,15 +63,19 @@ export function PaymentForm({
   preselectedClientLabel,
   preselectedLoanId,
   preselectedInstallmentId,
+  canVoidReceipts = false,
 }: {
   preselectedClientId?: string
   preselectedClientLabel?: string
   preselectedLoanId?: string
   preselectedInstallmentId?: string
+  canVoidReceipts?: boolean
 }) {
   const router = useRouter()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
+  const [receiptDialogOpen, setReceiptDialogOpen] = useState(false)
+  const [receiptPaymentIds, setReceiptPaymentIds] = useState<string[]>([])
   const [loans, setLoans] = useState<LoanOption[]>([])
   const [installments, setInstallments] = useState<InstallmentOption[]>([])
   const [loadingLoans, setLoadingLoans] = useState(false)
@@ -159,8 +164,8 @@ export function PaymentForm({
     }
 
     toast.success("Pago registrado")
-    router.push(`/prestamos/${loanId}`)
-    router.refresh()
+    setReceiptPaymentIds(result.paymentIds)
+    setReceiptDialogOpen(true)
   }
 
   function onSubmit(values: PaymentInput) {
@@ -458,6 +463,18 @@ export function PaymentForm({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <ReceiptDialog
+        open={receiptDialogOpen}
+        onOpenChange={setReceiptDialogOpen}
+        paymentIds={receiptPaymentIds}
+        mode="generate"
+        canVoid={canVoidReceipts}
+        onContinue={() => {
+          router.push(`/prestamos/${loanId}`)
+          router.refresh()
+        }}
+      />
     </>
   )
 }

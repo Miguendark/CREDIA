@@ -22,6 +22,7 @@ export type PaymentMethod = "efectivo" | "transferencia" | "deposito" | "tarjeta
 export type CapitalTransactionType = "aporte" | "retiro" | "prestamo" | "pago" | "ajuste"
 export type WhatsappConversationStatus = "pendiente" | "atendida" | "cerrada"
 export type WhatsappMessageSender = "cliente" | "agente" | "bot"
+export type ReceiptStatus = "activo" | "anulado"
 
 export interface Database {
   public: {
@@ -283,6 +284,41 @@ export interface Database {
         Update: Record<string, never>
         Relationships: []
       }
+      // Toda escritura pasa por create_receipt / void_receipt (migración
+      // 0010) — igual que loans/installments/payments, Insert/Update directo
+      // está revocado a nivel de Postgres, no solo aquí.
+      receipts: {
+        Row: {
+          id: string
+          receipt_number: string
+          payment_id: string
+          covered_payment_ids: string[]
+          loan_id: string
+          client_id: string
+          client_name: string
+          client_code: string
+          loan_number: string
+          amount_paid: number
+          installments_covered: unknown
+          installments_label: string
+          total_installments: number
+          installments_paid_count: number
+          outstanding_balance: number
+          next_payment_date: string | null
+          collector_id: string | null
+          collector_name: string
+          payment_date: string
+          status: ReceiptStatus
+          void_reason: string | null
+          voided_by: string | null
+          voided_at: string | null
+          created_by: string | null
+          created_at: string
+        }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
     }
     Views: {
       client_summary: {
@@ -346,6 +382,19 @@ export interface Database {
           p_transaction_date: string
         }
         Returns: Database["public"]["Tables"]["capital_transactions"]["Row"]
+      }
+      create_receipt: {
+        Args: {
+          p_payment_ids: string[]
+        }
+        Returns: Database["public"]["Tables"]["receipts"]["Row"]
+      }
+      void_receipt: {
+        Args: {
+          p_receipt_id: string
+          p_reason: string
+        }
+        Returns: Database["public"]["Tables"]["receipts"]["Row"]
       }
     }
   }

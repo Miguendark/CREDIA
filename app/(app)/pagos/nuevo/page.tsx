@@ -2,6 +2,7 @@ import type { Metadata } from "next"
 import { createClient } from "@/lib/supabase/server"
 import { getClientById } from "@/services/clients.service"
 import { getLoanById } from "@/services/loans.service"
+import { getCurrentStaffUser } from "@/services/users.service"
 import { PageHeader } from "@/components/shared/page-header"
 import { PaymentForm } from "@/components/payments/payment-form"
 
@@ -14,6 +15,9 @@ export default async function NuevoPagoPage({
 }) {
   const { clienteId, loanId, installmentId } = await searchParams
   const supabase = await createClient()
+
+  const staffUser = await getCurrentStaffUser(supabase)
+  const canVoidReceipts = staffUser?.role === "admin" || staffUser?.role === "supervisor"
 
   let resolvedClientId = clienteId
   let preselectedClientLabel: string | undefined
@@ -37,6 +41,7 @@ export default async function NuevoPagoPage({
         preselectedClientLabel={preselectedClientLabel}
         preselectedLoanId={loanId}
         preselectedInstallmentId={installmentId}
+        canVoidReceipts={canVoidReceipts}
       />
     </div>
   )

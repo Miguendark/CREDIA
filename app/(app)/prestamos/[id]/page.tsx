@@ -5,6 +5,7 @@ import { HandCoins, PiggyBank, Receipt, Wallet } from "lucide-react"
 import { createClient } from "@/lib/supabase/server"
 import { getLoanById, listInstallmentsByLoan } from "@/services/loans.service"
 import { listPayments } from "@/services/payments.service"
+import { getCurrentStaffUser } from "@/services/users.service"
 import { PageHeader } from "@/components/shared/page-header"
 import { EmptyState } from "@/components/shared/empty-state"
 import { Button } from "@/components/ui/button"
@@ -33,12 +34,14 @@ export default async function PrestamoDetailPage({ params }: { params: Promise<{
   const loan = await getLoanById(supabase, id)
   if (!loan) notFound()
 
-  const [installments, paymentsResult] = await Promise.all([
+  const [installments, paymentsResult, staffUser] = await Promise.all([
     listInstallmentsByLoan(supabase, id),
     listPayments(supabase, { loanId: id, pageSize: 50 }),
+    getCurrentStaffUser(supabase),
   ])
 
   const canCancel = loan.status === "activo"
+  const canVoidReceipts = staffUser?.role === "admin" || staffUser?.role === "supervisor"
 
   return (
     <div className="space-y-6">
@@ -105,7 +108,7 @@ export default async function PrestamoDetailPage({ params }: { params: Promise<{
         {paymentsResult.items.length === 0 ? (
           <EmptyState icon={Receipt} title="Sin pagos registrados" />
         ) : (
-          <PaymentsTable items={paymentsResult.items} showClient={false} />
+          <PaymentsTable items={paymentsResult.items} showClient={false} canVoidReceipts={canVoidReceipts} />
         )}
       </div>
     </div>
