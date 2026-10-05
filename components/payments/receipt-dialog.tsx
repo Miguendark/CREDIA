@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
-import { Ban, Download, Loader2, Receipt as ReceiptIcon, Share2 } from "lucide-react"
+import { Ban, Download, Loader2, Printer, Receipt as ReceiptIcon, Share2 } from "lucide-react"
 import { toast } from "sonner"
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import {
@@ -24,6 +24,18 @@ import {
   voidReceiptAction,
 } from "@/app/(app)/pagos/receipt-actions"
 import { voidReceiptSchema } from "@/lib/validations/receipt"
+import { buildReceiptTicket } from "@/lib/printer/escpos"
+import {
+  describePrinterError,
+  getAutoPrintEnabled,
+  getSavedPrinter,
+  isPrinterSelectionCancelled,
+  isPrinterSupported,
+  printRaw,
+  requestPrinter,
+  setAutoPrintEnabled,
+  type PrinterPort,
+} from "@/lib/printer/thermal-printer"
 import type { Receipt } from "@/services/receipts.service"
 
 type DialogState = "loading" | "ready" | "error" | "not_found"
@@ -66,6 +78,70 @@ export function ReceiptDialog({
   const [voidError, setVoidError] = useState("")
   const [isVoiding, setIsVoiding] = useState(false)
   const cardRef = useRef<HTMLDivElement>(null)
+  const [isPrinting, setIsPrinting] = useState(false)
+  const [printerSupported, setPrinterSupported] = useState(false)
+  const [autoPrint, setAutoPrint] = useState(true)
+  const autoPrintedRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    // navigator/localStorage no existen en el servidor: se lee tras montar
+    // para no desajustar el HTML de la hidratación.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setPrinterSupported(isPrinterSupported())
+    setAutoPrint(getAutoPrintEnabled())
+  }, [])
+
+  async function printReceipt(target: Receipt, port?: PrinterPort) {
+    setIsPrinting(true)
+    try {
+      await printRaw(buildReceiptTicket(target, { reprint: mode === "reprint" }), port)
+      toast.success("Recibo impreso (copia cliente + copia negocio)")
+    } catch (error) {
+      toast.error(describePrinterError(error))
+    } finally {
+      setIsPrinting(false)
+    }
+  }
+
+  // Impresión automática: al generarse el recibo de un pago nuevo, si la
+  // impresora ya fue conectada antes en este navegador, sale solo.
+  useEffect(() => {
+    if (state !== "ready" || !receipt || mode !== "generate") return
+    if (receipt.status !== "activo" || autoPrintedRef.current === receipt.id) return
+    if (!isPrinterSupported() || !getAutoPrintEnabled()) return
+    autoPrintedRef.current = receipt.id
+
+    getSavedPrinter().then((port) => {
+      if (port) {
+        printReceipt(receipt, port)
+      } else {
+        toast.info('Pulsa "Imprimir" una vez para conectar la impresora; después los recibos saldrán solos.')
+      }
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, receipt, mode])
+
+  async function handlePrint() {
+    if (!receipt) return
+    try {
+      const port = (await getSavedPrinter()) ?? (await requestPrinter())
+      await printReceipt(receipt, port)
+    } catch (error) {
+      if (isPrinterSelectionCancelled(error)) return
+      toast.error(describePrinterError(error))
+    }
+  }
+
+  async function handleChangePrinter() {
+    if (!receipt) return
+    try {
+      const port = await requestPrinter()
+      await printReceipt(receipt, port)
+    } catch (error) {
+      if (isPrinterSelectionCancelled(error)) return
+      toast.error(describePrinterError(error))
+    }
+  }
 
   useEffect(() => {
     if (!open || paymentIds.length === 0) return
@@ -231,6 +307,35 @@ export function ReceiptDialog({
                 <ReceiptCard receipt={receipt} isCopy={mode === "reprint"} cardRef={cardRef} />
               </div>
             </div>
+
+            {printerSupported ? (
+              <div className="flex w-full flex-col gap-2">
+                <Button onClick={handlePrint} disabled={isPrinting} className="w-full">
+                  {isPrinting ? <Loader2 className="size-4 animate-spin" /> : <Printer className="size-4" />}
+                  {isPrinting ? "Imprimiendo..." : "Imprimir (2 copias)"}
+                </Button>
+                <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={autoPrint}
+                      onChange={(e) => {
+                        setAutoPrint(e.target.checked)
+                        setAutoPrintEnabled(e.target.checked)
+                      }}
+                    />
+                    Imprimir automáticamente al registrar pagos
+                  </label>
+                  <button type="button" className="underline" onClick={handleChangePrinter} disabled={isPrinting}>
+                    Cambiar impresora
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <p className="text-center text-xs text-muted-foreground">
+                Para imprimir en la impresora térmica abre CREDIA en Google Chrome o Microsoft Edge desde la PC.
+              </p>
+            )}
 
             <DialogFooter className="w-full flex-col gap-2 sm:flex-row">
               <Button
