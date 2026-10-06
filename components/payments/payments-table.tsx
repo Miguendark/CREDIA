@@ -1,17 +1,31 @@
+"use client"
+
+import { useState } from "react"
 import Link from "next/link"
+import { Receipt as ReceiptIcon } from "lucide-react"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Card, CardContent } from "@/components/ui/card"
+import { Button } from "@/components/ui/button"
 import { PaymentMethodBadge } from "@/components/shared/badges"
+import { ReceiptDialog } from "@/components/payments/receipt-dialog"
 import { formatCurrency, formatDate } from "@/lib/utils/format"
 import type { PaymentWithRelations } from "@/types/domain"
 
 export function PaymentsTable({
   items,
   showClient = true,
+  canVoidReceipts = false,
 }: {
   items: PaymentWithRelations[]
   showClient?: boolean
+  canVoidReceipts?: boolean
 }) {
+  const [reprintPaymentId, setReprintPaymentId] = useState<string | null>(null)
+
+  function openReceipt(paymentId: string) {
+    setReprintPaymentId(paymentId)
+  }
+
   return (
     <>
       <Card className="hidden overflow-hidden py-0 md:block">
@@ -27,6 +41,7 @@ export function PaymentsTable({
               <TableHead>Método</TableHead>
               <TableHead>Fecha</TableHead>
               <TableHead>Usuario</TableHead>
+              <TableHead className="text-right">Comprobante</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -59,6 +74,11 @@ export function PaymentsTable({
                 </TableCell>
                 <TableCell className="text-muted-foreground">{formatDate(payment.payment_date)}</TableCell>
                 <TableCell className="text-muted-foreground">{payment.created_by_user?.name ?? "—"}</TableCell>
+                <TableCell className="text-right">
+                  <Button variant="ghost" size="icon" title="Ver recibo" onClick={() => openReceipt(payment.id)}>
+                    <ReceiptIcon className="size-4" />
+                  </Button>
+                </TableCell>
               </TableRow>
             ))}
           </TableBody>
@@ -84,10 +104,29 @@ export function PaymentsTable({
                 <span className="text-muted-foreground">Fecha</span>
                 <span>{formatDate(payment.payment_date)}</span>
               </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full"
+                onClick={() => openReceipt(payment.id)}
+              >
+                <ReceiptIcon className="size-4" />
+                Ver recibo
+              </Button>
             </CardContent>
           </Card>
         ))}
       </div>
+
+      <ReceiptDialog
+        open={reprintPaymentId !== null}
+        onOpenChange={(open) => {
+          if (!open) setReprintPaymentId(null)
+        }}
+        paymentIds={reprintPaymentId ? [reprintPaymentId] : []}
+        mode="reprint"
+        canVoid={canVoidReceipts}
+      />
     </>
   )
 }

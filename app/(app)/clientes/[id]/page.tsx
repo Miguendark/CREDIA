@@ -7,6 +7,7 @@ import { getClientById } from "@/services/clients.service"
 import { listLoansByClient } from "@/services/loans.service"
 import { listPayments } from "@/services/payments.service"
 import { listAuditLogs } from "@/services/audit.service"
+import { getCurrentStaffUser } from "@/services/users.service"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent } from "@/components/ui/card"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -33,11 +34,13 @@ export default async function ClienteProfilePage({ params }: { params: Promise<{
   const client = await getClientById(supabase, id)
   if (!client) notFound()
 
-  const [loans, paymentsResult, auditResult] = await Promise.all([
+  const [loans, paymentsResult, auditResult, staffUser] = await Promise.all([
     listLoansByClient(supabase, id),
     listPayments(supabase, { clientId: id, pageSize: 50 }),
     listAuditLogs(supabase, { entityId: id, pageSize: 20 }),
+    getCurrentStaffUser(supabase),
   ])
+  const canVoidReceipts = staffUser?.role === "admin" || staffUser?.role === "supervisor"
 
   const loansWithClient = loans.map((loan) => ({
     ...loan,
@@ -147,7 +150,7 @@ export default async function ClienteProfilePage({ params }: { params: Promise<{
           {paymentsResult.items.length === 0 ? (
             <EmptyState icon={HandCoins} title="Sin pagos" description="Este cliente aún no tiene pagos registrados." />
           ) : (
-            <PaymentsTable items={paymentsResult.items} showClient={false} />
+            <PaymentsTable items={paymentsResult.items} showClient={false} canVoidReceipts={canVoidReceipts} />
           )}
         </TabsContent>
 
