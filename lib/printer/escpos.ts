@@ -10,6 +10,29 @@ import type { Receipt } from "@/services/receipts.service"
  */
 export const LINE_WIDTH = 32
 
+/** Teléfono que aparece debajo del logo en el ticket. */
+export const BUSINESS_PHONE = "(829) 789-9985"
+
+/** Pausa entre la copia del cliente y la del negocio, para poder cortar la primera. */
+export const COPY_PAUSE_MS = 2000
+
+/**
+ * Logo de CREDIA ya convertido a mapa de bits de 1 bit (negro = imprime),
+ * 256 x 132 puntos (32 bytes por fila), formato ESC/POS "GS v 0".
+ * Generado a partir del logo oficial; para cambiarlo hay que regenerarlo.
+ */
+const LOGO_WIDTH_BYTES = 32
+const LOGO_HEIGHT = 132
+const LOGO_BASE64 =
+  "AAAAAAAAAAAAAAAAAAAAf/8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf///AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH/////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB//////4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf//////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD///////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA////////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH////////gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB/////////gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/////////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB/////////+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/////////8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB//////////4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP///wAH////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB///4AAD////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//8AAAD///4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB///AAAAD//+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//4AAAAD//wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//+AAAAAH/+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH//wAAAAAP/gADgAAAAAAAAAAAAAAAAAAAAAAAAAAAA//+AcAAAAf8AA/gAAAAAAAAAAAAAAAAAAAAAAAAAAAD//wPAAAAA/gAH/AAAAAAAAAAAAAAAAAAAAAAAAAAAAf/+DwAAAAB4AB/8AAAAAAAAAAAAAAAAAAAAAAAAAAAB//w+AAAAADAAP/wAAAAAAAAAAAAAAAAAAAAAAAAAAAP/+PwAAAAAAAD/+AAAAAAAAAAAAAAAAAAAAAAAAAAAA//x+AAAAAAAAf/4AAAAAAAAAAAAAAAAAAAAAAAAAAAH/+fwAAAAAAAD/+AAAAAAAAAAAAAAAAAAAAAAAAAAAAf/7+AAAAAAAA//wAAAAAAAAAAAAAAAAAAAAAAAAAAAD//fwAAAAAAAH/+AAAAAAAAAAAAAAAAAAAAAAAAAAAAP/7+AAAAAAAA//wAAAAAAAAAAAAAAAAAAAAAAAAAAAA///4AAAAAAAH/+AAAAAAAAAAAAAAAAAAAAAAAAAAAAH///AAAAAAAB//wAAAAAAAAAAAAAAAAAAAAAAAAAAAAf//4AAAAAAAP/+AAAAAAAAAAAAAAAAAAAAAAAAAAAAB///gAAAAAAB//wAAAAAAAAAAAAAAAAAAAAAAAAAAAAH//8AAGAAAAf/+AAAAAAAAAAAAAAAAAAAAAAAAAAAAA///wAD+AAAD//wAAAAAAAAAAAAAAAAAAAAAAAAAAAAD//+AAf+AAAf/+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//4AD/8AAD//wAAAAAAAAAAAAAAAAAAAAAAAAAAAAA///gAP/4AA//+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAD//+AA//wAH//wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//wAH//gA//+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAA///AAP//AH//wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH//8AA//+A//+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf//wAD//8P//wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB///AAH//5//+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD//8AAP/////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//wAAf////+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA///AAA/////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD//8AAB////+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//wAAD////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA///AAAH///+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD//8AAAP///wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//4AAAf//8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf//gAAA///gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB//+AAAB//8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH//8AAAD//gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//wAAAH/8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA///gAAAP/gEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD///AAAAf8A8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH//8AAAA/gH4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf//4AAAB4A/wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA///wAAAAAH/wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD///gAAAAB//gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH///gAAAAP//gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP///AAAAD///AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA////AAAA////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB////gAAP///8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD////wAP////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH//////////+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP//////////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/////////+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB//////////wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB/////////8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////////gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH////////8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP////////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP///////4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf//////+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf//////gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAf/////4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP////8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP////AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD///AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/4AAP///8AAAf/////A///AAAAAAAAAAAAAAAAAAAH//+AB/////gAB/////+H////wAAB//AAAB/8AAAAAB////AH/////gAH/////4f////4AAH/8AAAP/4AAAAAf////Af/////gAf/////h/////4AAf/wAAA//gAAAAH////+B//////AB/////+H/////4AB//AAAH//AAAAB/////+H/////+AH/////4f/////wAH/8AAAf/8AAAAP/////4f/////8Af/////h//////gAf/wAAD//4AAAB//////B//////4B/////+H//////AB//AAAP//gAAAP/////4H//////wH/////4f//////AH/8AAB///AAAB///j//Af//////Af/////B//////8Af/wAAH//8AAAP//gA/4B//AAP/8B//AAAAH/8AH//4B//AAA///4AAA//4AA/AH/8AAf/4H/8AAAAf/wAD//wH/8AAD///gAAH/+AAA4Af/wAB//gf/wAAAB//AAH//Af/wAAf///AAAf/wAABAB//AAD/+B//AAAAH/8AAH/+B//AAB///8AAD/+AAAAAH/8AAP/4H/8AAAAf/wAAf/4H/8AAP///4AAP/4AAAAAf/wAA//gf/wAAAB//AAA//wf/wAA////gAB//AAAAAB//AAD/+B//AAAAH/8AAB//B//AAH////AAH/8AAAAAH/8AAf/4H/////gf/wAAH/8H/8AAf/3/8AAf/gAAAAAf/wAD//gf////+B//AAAP/4P/wAD/+f/4AD/+AAAAAB//AAf/8B/////4H/8AAA//h//AAP/4//gAP/4AAAAAH//////wH/////gf/wAAD/+D/8AB//D//AA//gAAAAAf/////+Af////+B//AAAP/4P/wAH/8H/8AD/+AAAAAB//////4B/////4H/8AAA//g//AA//gf/4AP/4AAAAAH//////AH/////gf/wAAD/+D/8AD/+A//gA//gAAAAAf/////4Af////+B//AAAP/4P/wAP/wD//AD/+AAAAAB//////AB/////4H/8AAA//g//AB//AH/8AP/4AAAAAH/////4AH/////gf/wAAH/+D/8AH/8Af/4A//wAAAAAf////+AAf/wAAAB//AAAf/4P/wA//gA//gB//AAAAAB/////wAB//AAAAH/8AAB//A//AD/+AD//AH/+AAAAAH/+D//gAH/8AAAAf/wAAP/8D/8Af/wAH/8Af/8AAAQAf/wH//AAf/wAAAB//AAB//wP/wB//AIf/4A//wAADgB//AP/8AB//AAAAH/8AAP/+A//AP/4Bw//gD//wAAfAH/8A//4AH/8AAAAf/wAB//4D/8A//gHD//AH//gAH/Af/wB//wAf/wAAAB//AAf//AP/wH/8A+H/+Af//gB/+B//AD//gB/////+H//////4A//Af/wD4f/4A//////8H/8AH/+AH/////4f//////gD/8D//Afw//wB//////4f/wAf/8Af/////h//////8AP/wP/4B/D//AD//////h//AA//4B/////+H//////gA//B//gP+H/+AH/////8H/8AB//gH/////4f/////8AD/8H/8A/4f/4AP/////gf/wAH//Af/////h//////AAP/w//wH/w//wAf////4B//AAP/+B/////+H/////4AA//D/+Af/D//AAf////AH/8AAf/8H/////4f////+AAD/8f/4D/+H/+AAf///wAf/wAA//wf/////h/////gAAP/x//AP/4f/4AAf//4AB//AAD//h/////+H////gAAA//P/8B//w//wAAH/8AAAAAAAAAAAAAAAAAAAAAAAAAD/8//gAAAB//"
+
+function decodeBase64(value: string): Uint8Array {
+  const binary = atob(value)
+  const out = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i)
+  return out
+}
+
 const ESC = 0x1b
 const GS = 0x1d
 const LF = 0x0a
@@ -76,6 +99,23 @@ class EscPosBuilder {
     return this
   }
 
+  /** Imprime una imagen de 1 bit (GS v 0). */
+  raster(widthBytes: number, height: number, data: Uint8Array) {
+    this.raw(GS, 0x76, 0x30, 0x00, widthBytes & 0xff, widthBytes >> 8, height & 0xff, height >> 8)
+    for (const byte of data) this.bytes.push(byte)
+    return this
+  }
+
+  /** Cantidad de saltos de línea, para estimar cuánto tarda en imprimirse. */
+  lineCount() {
+    let count = 0
+    for (let i = 0; i < this.bytes.length; i++) {
+      if (this.bytes[i] === LF) count++
+      else if (this.bytes[i] === ESC && this.bytes[i + 1] === 0x64) count += this.bytes[i + 2] ?? 0
+    }
+    return count
+  }
+
   feed(lines: number) {
     return this.raw(ESC, 0x64, lines)
   }
@@ -118,9 +158,11 @@ function writeCopy(b: EscPosBuilder, receipt: Receipt, copyLabel: string, reprin
       ? Math.min(100, Math.round((receipt.installments_paid_count / receipt.total_installments) * 100))
       : 0
 
-  // Encabezado
-  b.align("center").bold(true).size(2, 2).line("CREDIA").size(1, 1).bold(false)
+  // Encabezado: logo + teléfono
+  b.align("center")
+  b.raster(LOGO_WIDTH_BYTES, LOGO_HEIGHT, decodeBase64(LOGO_BASE64)).raw(LF)
   b.wrapped("Prestamos que impulsan tus suenos")
+  b.bold(true).line(`Tel: ${BUSINESS_PHONE}`).bold(false)
   b.separator()
   b.bold(true).line("COMPROBANTE DE PAGO").bold(false)
   b.line(receipt.receipt_number)
@@ -149,7 +191,6 @@ function writeCopy(b: EscPosBuilder, receipt: Receipt, copyLabel: string, reprin
   // Detalle
   b.wrapped(receipt.installments_label)
   b.pair("Progreso:", `${receipt.installments_paid_count}/${receipt.total_installments} (${percent}%)`)
-  b.pair("Saldo pendiente:", formatCurrency(receipt.outstanding_balance))
   b.pair(
     "Proxima cuota:",
     receipt.next_payment_date ? formatDate(receipt.next_payment_date) : "Saldado"
@@ -159,20 +200,31 @@ function writeCopy(b: EscPosBuilder, receipt: Receipt, copyLabel: string, reprin
   b.align("center").line("Gracias por su pago").align("left")
 }
 
-/**
- * Ticket completo con las dos copias seguidas:
- * 1) COPIA CLIENTE  2) COPIA NEGOCIO, separadas por una línea de corte.
- */
-export function buildReceiptTicket(receipt: Receipt, options: { reprint?: boolean } = {}): Uint8Array {
-  const reprint = options.reprint ?? false
+export interface PrintCopy {
+  bytes: Uint8Array
+  /** Tiempo aproximado que tarda la impresora en sacar esta copia. */
+  estimatedMs: number
+}
+
+const LOGO_PRINT_MS = 700
+const MS_PER_LINE = 70
+
+function buildCopy(receipt: Receipt, copyLabel: string, reprint: boolean): PrintCopy {
   const b = new EscPosBuilder().init()
+  writeCopy(b, receipt, copyLabel, reprint)
+  b.feed(4) // deja espacio para cortar por la sierra de la impresora
+  return { bytes: b.build(), estimatedMs: LOGO_PRINT_MS + b.lineCount() * MS_PER_LINE }
+}
 
-  writeCopy(b, receipt, "COPIA CLIENTE", reprint)
-  b.feed(3)
-  b.align("center").line("- - - - - corte aqui - - - - -").align("left")
-  b.feed(3)
-  writeCopy(b, receipt, "COPIA NEGOCIO", reprint)
-  b.feed(5)
-
-  return b.build()
+/**
+ * Las dos copias del recibo, por separado, en el orden en que se imprimen:
+ * 1) COPIA CLIENTE  2) COPIA NEGOCIO. Quien imprime deja una pausa entre
+ * ambas (COPY_PAUSE_MS) para poder cortar la primera.
+ */
+export function buildReceiptCopies(receipt: Receipt, options: { reprint?: boolean } = {}): PrintCopy[] {
+  const reprint = options.reprint ?? false
+  return [
+    buildCopy(receipt, "COPIA CLIENTE", reprint),
+    buildCopy(receipt, "COPIA NEGOCIO", reprint),
+  ]
 }
