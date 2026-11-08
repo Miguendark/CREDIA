@@ -4,13 +4,15 @@ import Link from "next/link"
 import { usePathname } from "next/navigation"
 import { cn } from "@/lib/utils"
 import { NAV_ITEMS } from "./nav-items"
+import type { UserRole } from "@/types/database.types"
 
-export function SidebarNav({ onNavigate }: { onNavigate?: () => void }) {
+export function SidebarNav({ role, onNavigate }: { role: UserRole; onNavigate?: () => void }) {
   const pathname = usePathname()
+  const items = NAV_ITEMS.filter((item) => !item.roles || item.roles.includes(role))
 
   return (
     <nav className="flex flex-col gap-1 px-3">
-      {NAV_ITEMS.map((item) => {
+      {items.map((item) => {
         const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`)
         return (
           <Link

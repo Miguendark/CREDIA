@@ -99,7 +99,16 @@ export function describePrinterError(error: unknown): string {
 // Cola: si se mandan dos impresiones a la vez, la segunda espera a la primera.
 let queue: Promise<void> = Promise.resolve()
 
-export function printRaw(data: Uint8Array, port?: PrinterPort): Promise<void> {
+/**
+ * Envía uno o varios bloques a la impresora usando una sola conexión.
+ * `gapsMs[i]` es la espera después del bloque i (antes del siguiente).
+ */
+export function printRaw(
+  data: Uint8Array | Uint8Array[],
+  port?: PrinterPort,
+  options: { gapsMs?: number[] } = {}
+): Promise<void> {
+  const parts = Array.isArray(data) ? data : [data]
   const job = queue.then(async () => {
     const target = port ?? (await getSavedPrinter())
     if (!target) throw new Error("No hay impresora conectada. Pulsa \"Imprimir\" para elegirla.")
@@ -109,9 +118,14 @@ export function printRaw(data: Uint8Array, port?: PrinterPort): Promise<void> {
       if (!target.writable) throw new Error("La impresora no acepta datos en este momento.")
       const writer = target.writable.getWriter()
       try {
-        for (let i = 0; i < data.length; i += CHUNK_SIZE) {
-          await writer.write(data.slice(i, i + CHUNK_SIZE))
-          await sleep(40) // deja respirar al buffer Bluetooth de la impresora
+        for (let p = 0; p < parts.length; p++) {
+          const part = parts[p]
+          for (let i = 0; i < part.length; i += CHUNK_SIZE) {
+            await writer.write(part.slice(i, i + CHUNK_SIZE))
+            await sleep(40) // deja respirar al buffer Bluetooth de la impresora
+          }
+          const gap = options.gapsMs?.[p]
+          if (gap && p < parts.length - 1) await sleep(gap)
         }
         await writer.close()
       } finally {

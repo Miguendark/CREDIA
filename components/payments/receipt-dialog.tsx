@@ -24,7 +24,7 @@ import {
   voidReceiptAction,
 } from "@/app/(app)/pagos/receipt-actions"
 import { voidReceiptSchema } from "@/lib/validations/receipt"
-import { buildReceiptTicket } from "@/lib/printer/escpos"
+import { buildReceiptCopies, COPY_PAUSE_MS } from "@/lib/printer/escpos"
 import {
   describePrinterError,
   getAutoPrintEnabled,
@@ -94,7 +94,13 @@ export function ReceiptDialog({
   async function printReceipt(target: Receipt, port?: PrinterPort) {
     setIsPrinting(true)
     try {
-      await printRaw(buildReceiptTicket(target, { reprint: mode === "reprint" }), port)
+      // Copia cliente, pausa para cortarla, y luego copia negocio.
+      const copies = buildReceiptCopies(target, { reprint: mode === "reprint" })
+      await printRaw(
+        copies.map((c) => c.bytes),
+        port,
+        { gapsMs: copies.map((c) => c.estimatedMs + COPY_PAUSE_MS) }
+      )
       toast.success("Recibo impreso (copia cliente + copia negocio)")
     } catch (error) {
       toast.error(describePrinterError(error))
