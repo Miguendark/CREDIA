@@ -1,4 +1,4 @@
--- NEXA — Reversa de la migración 0011 (días fijos + cambio de fecha de pago)
+-- NEXA — Reversa de la migración 0011 (Fechas de pago: Día fijo + cambio de fecha de pago)
 --
 -- Elimina TODO lo agregado por 0011_fixed_payment_days.sql, en orden inverso,
 -- y nada más. No hace DELETE ni TRUNCATE de ningún préstamo, cuota, pago ni
@@ -6,7 +6,7 @@
 --
 -- SALVAGUARDA: si existe algún préstamo con schedule_type = 'fixed_days', el
 -- script se DETIENE sin cambiar nada. Borrar las columnas haría perder qué
--- días fijos tiene cada préstamo. En ese caso hay que decidir primero qué
+-- día fijo (del mes o de la semana) tiene cada préstamo. En ese caso hay que decidir primero qué
 -- hacer con esos préstamos.
 --
 -- Lo que esta reversa NO deshace (es dato, no esquema):
@@ -30,17 +30,19 @@ begin
 end;
 $$;
 
-drop function if exists public.reschedule_loan_installments(uuid, text, smallint[], jsonb, text);
+drop function if exists public.reschedule_loan_installments(uuid, text, smallint[], smallint, jsonb, text);
 drop function if exists public.create_loan_with_schedule(
   uuid, numeric, numeric, public.loan_interest_type, integer, numeric, numeric, numeric,
-  public.loan_frequency, date, date, text, jsonb, text, smallint[]
+  public.loan_frequency, date, date, text, jsonb, text, smallint[], smallint
 );
 drop function if exists public.loan_add_period(date, public.loan_frequency, integer);
+drop function if exists public.fixed_schedule_next(date, smallint[], smallint);
 drop function if exists public.fixed_day_after(date, smallint[]);
-drop function if exists public.payment_days_error(smallint[]);
+drop function if exists public.fixed_schedule_error(public.loan_frequency, smallint[], smallint);
 
-alter table public.loans drop constraint if exists loans_payment_days_check;
+alter table public.loans drop constraint if exists loans_schedule_check;
 alter table public.loans drop constraint if exists loans_schedule_type_check;
+alter table public.loans drop column if exists payment_weekday;
 alter table public.loans drop column if exists payment_days;
 alter table public.loans drop column if exists schedule_type;
 

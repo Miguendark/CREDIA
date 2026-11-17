@@ -47,6 +47,7 @@ import {
   type InstallmentOption,
 } from "@/app/(app)/pagos/actions"
 import type { PaymentMethod } from "@/types/database.types"
+import { todayRD } from "@/lib/utils/date"
 
 const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
   { value: "efectivo", label: "Efectivo" },
@@ -55,8 +56,6 @@ const PAYMENT_METHODS: { value: PaymentMethod; label: string }[] = [
   { value: "tarjeta", label: "Tarjeta" },
   { value: "otro", label: "Otro" },
 ]
-
-const today = new Date().toISOString().slice(0, 10)
 
 export function PaymentForm({
   preselectedClientId,
@@ -72,6 +71,7 @@ export function PaymentForm({
   canVoidReceipts?: boolean
 }) {
   const router = useRouter()
+  const today = todayRD()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [receiptDialogOpen, setReceiptDialogOpen] = useState(false)

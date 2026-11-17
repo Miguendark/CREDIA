@@ -1,4 +1,5 @@
 import type { Database } from "./database.types"
+import { todayRD } from "@/lib/utils/date"
 
 export type Client = Database["public"]["Tables"]["clients"]["Row"]
 export type Loan = Database["public"]["Tables"]["loans"]["Row"]
@@ -33,14 +34,14 @@ export interface PaymentWithRelations extends Payment {
 /** "Vencido" nunca se guarda como estado del préstamo: se deriva en consulta. */
 export function isLoanOverdue(loan: Pick<Loan, "status" | "next_payment_date">): boolean {
   if (loan.status !== "activo" || !loan.next_payment_date) return false
-  return new Date(loan.next_payment_date) < new Date(new Date().toISOString().slice(0, 10))
+  return loan.next_payment_date < todayRD()
 }
 
 export function isInstallmentOverdue(
   installment: Pick<Installment, "status" | "due_date">
 ): boolean {
   if (installment.status !== "pendiente" && installment.status !== "parcial") return false
-  return new Date(installment.due_date) < new Date(new Date().toISOString().slice(0, 10))
+  return installment.due_date < todayRD()
 }
 
 export interface DashboardMetrics {

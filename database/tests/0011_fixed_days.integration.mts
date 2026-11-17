@@ -13,7 +13,8 @@ import { config } from "dotenv"
 import { randomBytes } from "node:crypto"
 import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import { calculateLoan } from "../../lib/finance/loan-calculator.ts"
-import { nextFixedDay, buildFixedDaySchedule } from "../../lib/finance/fixed-days.ts"
+import { nextFixedDay, nextScheduledDate, buildFixedSchedule } from "../../lib/finance/fixed-days.ts"
+import { addDaysIso, isoWeekday, todayRD } from "../../lib/utils/date.ts"
 import { planReschedule, type RescheduleInstallment } from "../../lib/finance/reschedule.ts"
 import { allocatePayment } from "../../lib/finance/payment-allocator.ts"
 
@@ -52,11 +53,12 @@ function must<T>(r: { data: T; error: { message: string } | null }, what: string
   if (r.error) throw new Error(`${what}: ${r.error.message}`)
   return r.data
 }
-const todayIso = new Date().toISOString().slice(0, 10)
+// "Hoy" en hora de República Dominicana, igual que la app y la RPC.
+const todayIso = todayRD()
 
 // ---------- Preflight: 0011 aplicada ----------
 {
-  const r = await service.from("loans").select("id, schedule_type, payment_days").limit(1)
+  const r = await service.from("loans").select("id, schedule_type, payment_days, payment_weekday").limit(1)
   if (r.error) {
     console.error(`DETENIDO: la migración 0011 no parece aplicada (${r.error.message})`)
     process.exit(2)
@@ -90,7 +92,7 @@ const clientId = clientRow.id as string
 
 // ---------- Helpers ----------
 type Calc = ReturnType<typeof calculateLoan>
-interface LoanOpts { principal: number; rate: number; type: "fixed_capital" | "declining_balance"; n: number; freq: "monthly" | "biweekly"; start: string; first: string }
+interface LoanOpts { principal: number; rate: number; type: "fixed_capital" | "declining_balance"; n: number; freq: "daily" | "weekly" | "monthly" | "biweekly"; start: string; first: string }
 function args(calc: Calc, o: LoanOpts) {
   return {
     p_client_id: clientId, p_principal_amount: o.principal, p_interest_rate: o.rate, p_interest_type: o.type,
@@ -103,9 +105,9 @@ function args(calc: Calc, o: LoanOpts) {
     })),
   }
 }
-const calcFor = (o: LoanOpts, days?: number[]) => calculateLoan({
+const calcFor = (o: LoanOpts, days?: number[], weekday: number | null = null) => calculateLoan({
   principal: o.principal, interestRate: o.rate, interestType: o.type, numberOfInstallments: o.n, frequency: o.freq,
-  firstPaymentDate: o.first, schedule: days ? { type: "fixed_days", days } : undefined,
+  firstPaymentDate: o.first, schedule: days ? { type: "fixed_days", days, weekday } : undefined,
 })
 const loan = async (id: string) => must(await service.from("loans").select("*").eq("id", id).single(), "loan")
 const insts = async (id: string) => must(await service.from("installments").select("*").eq("loan_id", id).order("installment_number"), "insts") as Record<string, unknown>[]
@@ -125,17 +127,19 @@ async function pay(db: Db, loanId: string, amount: number) {
     p_allocations: allocations.map((a) => ({ installment_id: a.installmentId, amount: a.amount, principal_applied: a.principalApplied, interest_applied: a.interestApplied })),
   })
 }
-const resched = (db: Db, loanId: string, dates: unknown, reason: string, type: string, days: number[] | null) =>
-  db.rpc("reschedule_loan_installments", { p_loan_id: loanId, p_schedule_type: type, p_payment_days: days, p_new_dates: dates, p_reason: reason })
+const resched = (db: Db, loanId: string, dates: unknown, reason: string, type: string, days: number[] | null, weekday: number | null = null) =>
+  db.rpc("reschedule_loan_installments", {
+    p_loan_id: loanId, p_schedule_type: type, p_payment_days: days, p_payment_weekday: weekday, p_new_dates: dates, p_reason: reason,
+  })
 const strip = (rows: Record<string, unknown>[]) => rows.map(({ due_date: _d, status: _s, updated_at: _u, ...rest }) => rest)
 
 // ===== A. Préstamos existentes =====
 console.log("A. Préstamos existentes tras aplicar 0011")
 {
-  const all = must(await service.from("loans").select("schedule_type, payment_days, notes"), "loans")
+  const all = must(await service.from("loans").select("schedule_type, payment_days, payment_weekday, notes"), "loans")
   const nonQa = all.filter((l) => l.notes !== "QA 0011")
-  check(`${nonQa.length} préstamos existentes (no QA) siguen como interval / NULL`,
-    nonQa.every((l) => l.schedule_type === "interval" && l.payment_days === null))
+  check(`${nonQa.length} préstamos existentes (no QA) siguen como interval (Automático) / NULL / NULL`,
+    nonQa.every((l) => l.schedule_type === "interval" && l.payment_days === null && l.payment_weekday === null))
 }
 
 // ===== C. RPC original =====
@@ -144,20 +148,22 @@ const oldOpts: LoanOpts = { principal: 10000, rate: 20, type: "fixed_capital", n
 const oldLoan = must(await cobrador.rpc("create_loan_with_installments", args(calcFor(oldOpts), oldOpts)), "rpc original") as { id: string }
 {
   const l = await loan(oldLoan.id)
-  check("cobrador crea préstamo con RPC original → interval / NULL", l.schedule_type === "interval" && l.payment_days === null)
+  check("cobrador crea préstamo con RPC original → interval / NULL / NULL",
+    l.schedule_type === "interval" && l.payment_days === null && l.payment_weekday === null)
 }
 
 // ===== D. Días fijos =====
-console.log("\nD. create_loan_with_schedule (días 20 y 5, desordenados a propósito)")
-const fxOpts: LoanOpts = { principal: 12000, rate: 20, type: "fixed_capital", n: 6, freq: "monthly", start: "2026-01-10", first: nextFixedDay("2026-01-10", [5, 20]) }
+console.log("\nD. create_loan_with_schedule: quincenal, días 20 y 5 (desordenados a propósito)")
+const fxOpts: LoanOpts = { principal: 12000, rate: 20, type: "fixed_capital", n: 6, freq: "biweekly", start: "2026-01-10", first: nextFixedDay("2026-01-10", [5, 20]) }
 const fxCalc = calcFor(fxOpts, [5, 20])
-const createFixed = (db: Db, calc: Calc, days: number[] | null, o: Partial<LoanOpts> = {}, type = "fixed_days") =>
-  db.rpc("create_loan_with_schedule", { ...args(calc, { ...fxOpts, ...o }), p_schedule_type: type, p_payment_days: days })
+const createFixed = (db: Db, calc: Calc, days: number[] | null, o: Partial<LoanOpts> = {}, type = "fixed_days", weekday: number | null = null) =>
+  db.rpc("create_loan_with_schedule", { ...args(calc, { ...fxOpts, ...o }), p_schedule_type: type, p_payment_days: days, p_payment_weekday: weekday })
 const fxLoan = must(await createFixed(cobrador, fxCalc, [20, 5]), "crear días fijos") as { id: string }
 {
   const l = await loan(fxLoan.id)
   const i = await insts(fxLoan.id)
-  check("guarda fixed_days {5,20}", l.schedule_type === "fixed_days" && JSON.stringify(l.payment_days) === "[5,20]")
+  check("guarda fixed_days {5,20}, frecuencia quincenal, sin día de semana",
+    l.schedule_type === "fixed_days" && JSON.stringify(l.payment_days) === "[5,20]" && l.payment_weekday === null && l.frequency === "biweekly")
   check("fechas 20/01, 05/02, 20/02, 05/03, 20/03, 05/04",
     JSON.stringify(i.map((x) => x.due_date)) === JSON.stringify(["2026-01-20", "2026-02-05", "2026-02-20", "2026-03-05", "2026-03-20", "2026-04-05"]))
   const ref = calcFor({ ...fxOpts, first: "2026-02-10" })
@@ -167,6 +173,31 @@ const fxLoan = must(await createFixed(cobrador, fxCalc, [20, 5]), "crear días f
     Number(l.total_amount) === ref.totalAmount && Number(l.total_interest) === ref.totalInterest)
 }
 
+// ===== D2. Semanal con día de la semana =====
+console.log("\nD2. Semanal, día fijo viernes (5)")
+const wkOpts: LoanOpts = { principal: 5000, rate: 10, type: "fixed_capital", n: 4, freq: "weekly", start: todayIso, first: nextScheduledDate(todayIso, { days: [], weekday: 5 }) }
+const wkLoan = must(await createFixed(admin, calcFor(wkOpts, [], 5), null, wkOpts, "fixed_days", 5), "crear semanal") as { id: string }
+{
+  const l = await loan(wkLoan.id)
+  const i = await insts(wkLoan.id)
+  check("guarda fixed_days, payment_weekday = 5, payment_days NULL, frecuencia semanal",
+    l.schedule_type === "fixed_days" && l.payment_weekday === 5 && l.payment_days === null && l.frequency === "weekly")
+  check("todas las cuotas caen viernes, cada 7 días, después de hoy",
+    i.every((x) => isoWeekday(String(x.due_date)) === 5) &&
+    i.every((x, k) => k === 0 ? String(x.due_date) > todayIso : x.due_date === addDaysIso(String(i[k - 1].due_date), 7)))
+  console.log(`     fechas: ${i.map((x) => x.due_date).join(", ")}`)
+}
+
+// ===== D3. Mensual con día 31 =====
+console.log("\nD3. Mensual, día 31 (cae el último día en meses cortos)")
+const mOpts: LoanOpts = { principal: 6000, rate: 10, type: "fixed_capital", n: 4, freq: "monthly", start: "2027-01-15", first: nextFixedDay("2027-01-15", [31]) }
+{
+  const ml = must(await createFixed(admin, calcFor(mOpts, [31]), [31], mOpts), "crear mensual 31") as { id: string }
+  const i = await insts(ml.id)
+  check("fechas 31/01, 28/02, 31/03, 30/04 (2027)",
+    JSON.stringify(i.map((x) => x.due_date)) === JSON.stringify(["2027-01-31", "2027-02-28", "2027-03-31", "2027-04-30"]))
+}
+
 // ===== E. Rechazos =====
 console.log("\nE. Rechazos al crear")
 {
@@ -174,14 +205,32 @@ console.log("\nE. Rechazos al crear")
   await expectError("días 30 y 31", () => createFixed(admin, fxCalc, [30, 31]), /28 en adelante/)
   await expectError("días 29 y 30", () => createFixed(admin, fxCalc, [29, 30]), /28 en adelante/)
   await expectError("días repetidos", () => createFixed(admin, fxCalc, [5, 5]), /repetir/)
-  await expectError("día 32", () => createFixed(admin, fxCalc, [32]), /entre 1 y 31/)
+  await expectError("quincenal con 1 día", () => createFixed(admin, fxCalc, [5]), /quincenal se eligen 2 días/)
+  await expectError("mensual con 2 días", () => createFixed(admin, calcFor({ ...fxOpts, freq: "monthly" }, [5, 20]), [5, 20], { freq: "monthly" }), /mensual se elige 1 día/)
+  await expectError("mensual día 32", () => createFixed(admin, calcFor({ ...fxOpts, freq: "monthly" }, [5]), [32], { freq: "monthly" }), /entre 1 y 31/)
+  {
+    const dOpts: LoanOpts = { ...fxOpts, freq: "daily", first: "2026-01-11" }
+    await expectError("diaria con día fijo", () => createFixed(admin, calcFor(dOpts), [5], dOpts), /diaria no permite/)
+  }
+  await expectError("semanal con días del mes", () => createFixed(admin, calcFor(wkOpts, [], 5), [5], wkOpts), /no días del mes/)
+  await expectError("semanal sin día de la semana", () => createFixed(admin, calcFor(wkOpts, [], 5), null, wkOpts), /día de la semana/)
+  await expectError("semanal día 8", () => createFixed(admin, calcFor(wkOpts, [], 5), null, wkOpts, "fixed_days", 8), /inválido/)
+  await expectError("quincenal con día de la semana", () => createFixed(admin, fxCalc, [5, 20], {}, "fixed_days", 3), /solo aplica a la frecuencia semanal/)
+  await expectError("Automático con día fijo", () => createFixed(admin, fxCalc, [5, 20], {}, "interval"), /solo aplica/)
   await expectError("primera cuota incorrecta", () => createFixed(admin, fxCalc, [5, 20], { first: "2026-02-05" }), /siguiente día fijo/)
   const tampered = { ...fxCalc, installments: fxCalc.installments.map((x, k) => (k === 3 ? { ...x, dueDate: "2026-03-06" } : x)) }
   await expectError("fecha de cuota alterada", () => createFixed(admin, tampered, [5, 20]), /debería vencer/)
-  await expectError("anon no puede ejecutar la RPC", () => anon.rpc("create_loan_with_schedule", { ...args(fxCalc, fxOpts), p_schedule_type: "fixed_days", p_payment_days: [5, 20] }), /permission denied|not find|JWT/i)
+  await expectError("anon no puede ejecutar la RPC", () => anon.rpc("create_loan_with_schedule", { ...args(fxCalc, fxOpts), p_schedule_type: "fixed_days", p_payment_days: [5, 20], p_payment_weekday: null }), /permission denied|not find|JWT/i)
   await expectError("helper interno no expuesto", () => cobrador.rpc("fixed_day_after", { p_after: "2026-01-01", p_days: [5] }), /permission denied/i)
-  await expectError("UPDATE directo payment_days={30,31} (admin) lo frena el check",
-    async () => admin.from("loans").update({ payment_days: [30, 31] }).eq("id", fxLoan.id).select("id"), /loans_payment_days_check/)
+  await expectError("helper fixed_schedule_error no expuesto", () => cobrador.rpc("fixed_schedule_error", { p_frequency: "monthly", p_days: [5], p_weekday: null }), /permission denied/i)
+  await expectError("UPDATE directo payment_days={30,31} (service role) lo frena el check",
+    async () => service.from("loans").update({ payment_days: [30, 31] }).eq("id", fxLoan.id).select("id"), /loans_schedule_check/)
+  await expectError("UPDATE directo: quincenal con 1 día (service role) lo frena el check",
+    async () => service.from("loans").update({ payment_days: [5] }).eq("id", fxLoan.id).select("id"), /loans_schedule_check/)
+  await expectError("UPDATE directo: frecuencia mensual con 2 días (service role) lo frena el check",
+    async () => service.from("loans").update({ frequency: "monthly" }).eq("id", fxLoan.id).select("id"), /loans_schedule_check/)
+  await expectError("UPDATE directo: semanal con día de semana Y días del mes (service role) lo frena el check",
+    async () => service.from("loans").update({ payment_days: [5] }).eq("id", wkLoan.id).select("id"), /loans_schedule_check/)
   const c1 = (await service.from("loans").select("id", { count: "exact", head: true })).count
   check("ningún préstamo creado tras los rechazos (atomicidad)", c0 === c1)
 }
@@ -206,9 +255,11 @@ await expectError("incluye cuota pagada", () => resched(supervisor, fxLoan.id, [
 await expectError("falta una cuota", () => resched(supervisor, fxLoan.id, dates.slice(1), REASON, "fixed_days", [10, 25]), /exactamente/)
 await expectError("fechas fuera del calendario", () => resched(supervisor, fxLoan.id, dates.map((d, k) => (k === 2 ? { ...d, due_date: "2027-12-31" } : d)), REASON, "fixed_days", [10, 25]), /debería vencer/)
 {
-  const early = buildFixedDaySchedule("2026-01-01", [10, 25], dates.length)
-  await expectError("antes de la última cuota con abono", () => resched(supervisor, fxLoan.id, dates.map((d, k) => ({ ...d, due_date: early[k] })), REASON, "fixed_days", [10, 25]), /posterior a/)
+  const early = buildFixedSchedule("2026-01-01", { days: [10, 25], weekday: null }, dates.length)
+  await expectError("primera fecha en el pasado (hoy RD)", () => resched(supervisor, fxLoan.id, dates.map((d, k) => ({ ...d, due_date: early[k] })), REASON, "fixed_days", [10, 25]), /pasado/)
 }
+await expectError("quincenal con 1 día", () => resched(supervisor, fxLoan.id, dates, REASON, "fixed_days", [10]), /quincenal se eligen 2 días/)
+await expectError("quincenal con día de semana", () => resched(supervisor, fxLoan.id, dates, REASON, "fixed_days", null, 2), /quincenal se eligen 2 días|solo aplica/)
 await expectError("formato de fecha ambiguo", () => resched(supervisor, fxLoan.id, dates.map((d, k) => (k === 0 ? { ...d, due_date: "10/12/2026" } : d)), REASON, "fixed_days", [10, 25]), /AAAA-MM-DD/)
 check("tras los rechazos las cuotas siguen idénticas", JSON.stringify(await insts(fxLoan.id)) === JSON.stringify(before))
 
@@ -249,6 +300,23 @@ console.log("\nF2. Préstamo por frecuencia: nueva fecha de inicio (admin)")
   check("montos idénticos", JSON.stringify(strip(a)) === JSON.stringify(strip(b)))
 }
 
+// ===== F3. Semanal: cambiar a otro día de la semana =====
+console.log("\nF3. Semanal: de viernes a lunes")
+{
+  const b = await insts(wkLoan.id)
+  await expectError("semanal con días del mes", () => resched(admin, wkLoan.id, [], "QA 0011: prueba semanal", "fixed_days", [5]), /no días del mes/)
+  const p = planReschedule(planInput(b), { type: "fixed_days", days: [], weekday: 1, afterDate: todayIso })
+  const r = await resched(admin, wkLoan.id, p.changes.map((c) => ({ installment_id: c.installmentId, due_date: c.newDate })), "QA 0011: ahora cobra los lunes", "fixed_days", null, 1)
+  check("admin cambia a lunes: OK", !r.error, r.error?.message)
+  const a = await insts(wkLoan.id)
+  const l = await loan(wkLoan.id)
+  check("todas las cuotas caen lunes", a.every((x) => isoWeekday(String(x.due_date)) === 1))
+  check("payment_weekday = 1, payment_days NULL, frecuencia semanal", l.payment_weekday === 1 && l.payment_days === null && l.frequency === "weekly")
+  check("montos idénticos", JSON.stringify(strip(a)) === JSON.stringify(strip(b)))
+  const wrong = p.changes.map((c, k) => ({ installment_id: c.installmentId, due_date: k === 1 ? addDaysIso(c.newDate, 1) : c.newDate }))
+  await expectError("una fecha que no es lunes", () => resched(admin, wkLoan.id, wrong, "QA 0011: prueba semanal", "fixed_days", null, 1), /debería vencer/)
+}
+
 // ===== G. Mora =====
 console.log("\nG. Mora con la fecha nueva")
 {
@@ -258,6 +326,7 @@ console.log("\nG. Mora con la fecha nueva")
   const o0 = await overdue()
   check("antes: next_payment_date en el pasado", String((await loan(late.id)).next_payment_date) < todayIso)
   const b = await insts(late.id)
+  await expectError("mensual con 2 días", () => resched(admin, late.id, [], "QA 0011: reestructuración", "fixed_days", [5, 20]), /mensual se elige 1 día/)
   const p3 = planReschedule(planInput(b), { type: "fixed_days", days: [15], afterDate: todayIso })
   must(await resched(admin, late.id, p3.changes.map((c) => ({ installment_id: c.installmentId, due_date: c.newDate })), "QA 0011: reestructuración", "fixed_days", [15]), "resched late")
   const l = await loan(late.id)
@@ -305,6 +374,12 @@ console.log("\nH2. Orden contrario: el pago llega antes que la reprogramación")
   console.log(`     H2a pago: OK | reprogramación con plan viejo: ${r1.error ? "rechazada: " + r1.error.message : "OK"}`)
   check("H2a: reprogramación con plan anterior al pago → rechazada", !!r1.error && /exactamente/.test(r1.error.message), r1.error?.message)
   check("H2a: tras el rechazo las cuotas siguen idénticas", JSON.stringify(await insts(l1.id)) === JSON.stringify(mid))
+  {
+    // Fechas desde hoy (no pasado) pero no posteriores a la cuota con abono → rechazadas.
+    const movable = mid.filter((x) => x.status === "pendiente")
+    const early = movable.map((x, k) => ({ installment_id: x.id, due_date: addDaysIso(todayIso, 14 * k) }))
+    await expectError("H2a: fechas antes de la cuota con abono", () => resched(supervisor, l1.id, early, R, "interval", null), /posterior a/)
+  }
   const fresh2 = planReschedule(planInput(mid), { type: "fixed_days", days: [8, 22], afterDate: todayIso })
   const r2 = await resched(supervisor, l1.id, toDates(fresh2), R, "fixed_days", [8, 22])
   const a1 = await insts(l1.id)

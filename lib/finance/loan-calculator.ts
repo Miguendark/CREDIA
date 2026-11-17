@@ -1,16 +1,18 @@
 import type { LoanFrequency, LoanInterestType } from "@/types/database.types"
-import { nextFixedDay } from "./fixed-days"
+import { nextScheduledDate } from "./fixed-days"
 import { addPeriod } from "./frequency"
 import { round2 } from "./round"
 
 /**
- * Calendario de días fijos del mes. Si se omite, las fechas se generan por
- * frecuencia a partir de firstPaymentDate (comportamiento original).
+ * "Día fijo": días del mes (mensual/quincenal) o día de la semana (semanal,
+ * 1 = lunes … 7 = domingo). Si se omite, las fechas se generan por
+ * frecuencia a partir de firstPaymentDate (Automático, comportamiento original).
  * Solo afecta las FECHAS de las cuotas; ningún monto depende de él.
  */
 export interface FixedDaysScheduleInput {
   type: "fixed_days"
   days: number[]
+  weekday?: number | null
 }
 
 export interface LoanCalculatorInput {
@@ -70,10 +72,11 @@ export function calculateLoan(input: LoanCalculatorInput): LoanCalculationResult
 function buildDueDates(input: LoanCalculatorInput): string[] {
   if (input.schedule?.type === "fixed_days") {
     // firstPaymentDate ya es el primer día fijo (lo calcula quien llama con
-    // nextFixedDay(start_date, days)); cada cuota siguiente es el próximo día fijo.
+    // nextScheduledDate(start_date, ...)); cada cuota siguiente es el próximo día fijo.
+    const schedule = { days: input.schedule.days, weekday: input.schedule.weekday ?? null }
     const dates = [input.firstPaymentDate]
     for (let i = 1; i < input.numberOfInstallments; i++) {
-      dates.push(nextFixedDay(dates[i - 1], input.schedule.days))
+      dates.push(nextScheduledDate(dates[i - 1], schedule))
     }
     return dates
   }

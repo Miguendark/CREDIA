@@ -1,9 +1,12 @@
 import type { TypedSupabaseClient } from "@/lib/supabase/types"
 import { logAudit } from "@/lib/supabase/audit"
 import { calculateLoan } from "@/lib/finance/loan-calculator"
-import type { LoanFrequency, LoanStatus } from "@/types/database.types"
+import { nextScheduledDate, normalizePaymentDays, validateFixedSchedule, type FixedSchedule } from "@/lib/finance/fixed-days"
+import { buildLoanReschedulePlan } from "@/lib/finance/reschedule"
+import { todayRD } from "@/lib/utils/date"
+import type { LoanStatus } from "@/types/database.types"
 import type { Installment, Loan, LoanWithClient } from "@/types/domain"
-import type { LoanInput } from "@/lib/validations/loan"
+import type { LoanInput, RescheduleLoanInput } from "@/lib/validations/loan"
 
 export type LoanFilterStatus = "todos" | "activo" | "pagado" | "vencido" | "cancelado"
 
@@ -29,7 +32,7 @@ export async function listLoans(
   const { search, status = "todos", page = 1, pageSize = 20 } = params
   const from = (page - 1) * pageSize
   const to = from + pageSize - 1
-  const today = new Date().toISOString().slice(0, 10)
+  const today = todayRD()
 
   let query = supabase.from("loans").select(LOAN_WITH_CLIENT_SELECT, { count: "exact" })
 
@@ -88,20 +91,35 @@ export async function listInstallmentsByLoan(supabase: TypedSupabaseClient, loan
 
 /**
  * Calcula el préstamo con lib/finance/loan-calculator y persiste el
- * resultado de forma atómica vía la función RPC create_loan_with_installments
- * (préstamo + cuotas + movimiento de capital + auditoría en una transacción).
+ * resultado de forma atómica (préstamo + cuotas + movimiento de capital +
+ * auditoría en una transacción):
+ *  - Automático: RPC original create_loan_with_installments (sin cambios)
+ *  - Día fijo: RPC create_loan_with_schedule (migración 0011), que llama a
+ *    la original y revalida todas las fechas en la base de datos.
+ * La frecuencia SIEMPRE es la que eligió el usuario; el día fijo debe coincidir con ella.
  */
 export async function createLoan(supabase: TypedSupabaseClient, input: LoanInput): Promise<Loan> {
+  const frequency = input.frequency
+  let schedule: FixedSchedule | null = null
+  if (input.schedule_type === "fixed_days") {
+    schedule = { days: normalizePaymentDays(input.payment_days ?? []), weekday: input.payment_weekday ?? null }
+    const error = validateFixedSchedule(frequency, schedule.days, schedule.weekday)
+    if (error) throw new Error(error)
+  }
+  // Con día fijo el servidor decide la primera fecha.
+  const firstPaymentDate = schedule ? nextScheduledDate(input.start_date, schedule) : input.first_payment_date
+
   const calculation = calculateLoan({
     principal: input.principal_amount,
     interestRate: input.interest_rate,
     interestType: input.interest_type,
     numberOfInstallments: input.number_of_installments,
-    frequency: input.frequency as LoanFrequency,
-    firstPaymentDate: input.first_payment_date,
+    frequency,
+    firstPaymentDate,
+    schedule: schedule ? { type: "fixed_days", ...schedule } : undefined,
   })
 
-  const { data, error } = await supabase.rpc("create_loan_with_installments", {
+  const args = {
     p_client_id: input.client_id,
     p_principal_amount: input.principal_amount,
     p_interest_rate: input.interest_rate,
@@ -110,9 +128,9 @@ export async function createLoan(supabase: TypedSupabaseClient, input: LoanInput
     p_installment_amount: calculation.installmentAmount,
     p_total_interest: calculation.totalInterest,
     p_total_amount: calculation.totalAmount,
-    p_frequency: input.frequency,
+    p_frequency: frequency,
     p_start_date: input.start_date,
-    p_first_payment_date: input.first_payment_date,
+    p_first_payment_date: firstPaymentDate,
     p_notes: input.notes || null,
     p_installments: calculation.installments.map((i) => ({
       installment_number: i.installmentNumber,
@@ -121,10 +139,63 @@ export async function createLoan(supabase: TypedSupabaseClient, input: LoanInput
       interest_amount: i.interestAmount,
       total_amount: i.totalAmount,
     })),
-  })
+  }
+
+  const { data, error } = schedule
+    ? await supabase.rpc("create_loan_with_schedule", {
+        ...args,
+        p_schedule_type: "fixed_days",
+        p_payment_days: schedule.weekday != null ? null : schedule.days,
+        p_payment_weekday: schedule.weekday,
+      })
+    : await supabase.rpc("create_loan_with_installments", args)
 
   if (error) throw new Error(error.message)
   return data as Loan
+}
+
+/**
+ * Cambia la fecha de pago de un préstamo (solo fechas, nunca montos).
+ *
+ * 1. Recalcula el plan en el servidor con los datos ACTUALES de la BD.
+ * 2. Si no coincide con lo que el usuario vio (`expected_dates`), por
+ *    ejemplo porque entró un pago mientras tenía el diálogo abierto, no
+ *    cambia nada y pide revisar de nuevo.
+ * 3. La RPC reschedule_loan_installments vuelve a validar todo bajo lock
+ *    (rol, motivo, cuotas sin abono, calendario) y deja el registro en
+ *    audit_logs.
+ */
+export async function rescheduleLoan(supabase: TypedSupabaseClient, input: RescheduleLoanInput): Promise<void> {
+  const loan = await getLoanById(supabase, input.loan_id)
+  if (!loan) throw new Error("El préstamo no existe")
+  if (loan.status !== "activo") throw new Error("Solo se puede cambiar la fecha de un préstamo activo")
+
+  const installments = await listInstallmentsByLoan(supabase, input.loan_id)
+  const plan = buildLoanReschedulePlan(loan.frequency, installments, input)
+
+  const today = todayRD()
+  if (plan.changes[0].newDate < today) {
+    throw new Error("La nueva primera fecha no puede estar en el pasado")
+  }
+
+  const planned = plan.changes.map((c) => `${c.installmentId}:${c.newDate}`).sort()
+  const expected = input.expected_dates.map((d) => `${d.installment_id}:${d.due_date}`).sort()
+  if (planned.join("|") !== expected.join("|")) {
+    throw new Error(
+      "Las cuotas del préstamo cambiaron mientras revisabas (por ejemplo, entró un pago). Cierra el diálogo y vuelve a abrirlo."
+    )
+  }
+
+  const { error } = await supabase.rpc("reschedule_loan_installments", {
+    p_loan_id: input.loan_id,
+    p_schedule_type: input.schedule_type,
+    p_payment_days:
+      input.schedule_type === "fixed_days" && input.payment_weekday === null ? normalizePaymentDays(input.payment_days) : null,
+    p_payment_weekday: input.schedule_type === "fixed_days" ? input.payment_weekday : null,
+    p_new_dates: plan.changes.map((c) => ({ installment_id: c.installmentId, due_date: c.newDate })),
+    p_reason: input.reason,
+  })
+  if (error) throw new Error(error.message)
 }
 
 export async function cancelLoan(supabase: TypedSupabaseClient, id: string, reason: string): Promise<void> {

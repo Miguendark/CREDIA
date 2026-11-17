@@ -1,22 +1,36 @@
--- NEXA — Migración 0011: Préstamos con días fijos del mes + cambio de fecha de pago
+-- NEXA — Migración 0011: "Fechas de pago: Día fijo" + cambio de fecha de pago
 --
 -- ADITIVA. Lo único que toca de lo existente (aprobado explícitamente):
---   * ALTER TABLE loans ADD COLUMN schedule_type / payment_days, con default
---     y check. Los préstamos existentes quedan como 'interval' con
---     payment_days NULL, es decir, exactamente como funcionan hoy. En
---     PostgreSQL 11+ agregar una columna con default constante no reescribe
---     la tabla.
+--   * ALTER TABLE loans ADD COLUMN schedule_type / payment_days /
+--     payment_weekday, con default y check. Los préstamos existentes quedan
+--     como 'interval' (Automático) con payment_days y payment_weekday NULL,
+--     es decir, exactamente como funcionan hoy. En PostgreSQL 11+ agregar
+--     una columna con default constante no reescribe la tabla.
 -- No modifica create_loan_with_installments, register_payment, vistas,
 -- políticas RLS ni privilegios de tablas existentes. No hace DELETE ni
 -- TRUNCATE de nada.
 --
+-- Modelo (la frecuencia la elige el usuario; nunca se deduce):
+--   schedule_type = 'interval'   -> Automático: cada período según frequency.
+--                                   payment_days NULL, payment_weekday NULL.
+--   schedule_type = 'fixed_days' -> Día fijo, según loans.frequency:
+--     monthly  : payment_days = {d}      (1 día del mes, 1..31)
+--     biweekly : payment_days = {a, b}   (a < b, 1..31, no ambos >= 28)
+--     weekly   : payment_weekday = 1..7  (ISO: 1 = lunes … 7 = domingo)
+--     daily    : no permitido (solo Automático)
+--   Si el mes no tiene el día elegido, la cuota cae el último día del mes.
+--
+-- "Hoy" = fecha en República Dominicana (America/Santo_Domingo), no UTC.
+--
 -- Objetos nuevos:
---   1) loans.schedule_type, loans.payment_days (+ check loans_payment_days_check)
---   2) Helpers internos: fixed_day_after, loan_add_period, payment_days_error
+--   1) loans.schedule_type, loans.payment_days, loans.payment_weekday
+--      (+ checks loans_schedule_type_check y loans_schedule_check)
+--   2) Helpers internos: fixed_schedule_error, fixed_day_after,
+--      fixed_schedule_next, loan_add_period
 --   3) RPC create_loan_with_schedule: envuelve (llama) a la RPC original dentro
---      de la misma transacción y luego guarda el tipo de calendario.
+--      de la misma transacción y luego guarda el día fijo.
 --   4) RPC reschedule_loan_installments: cambia SOLO las fechas de las cuotas
---      pendientes sin abono. Nunca toca montos.
+--      pendientes sin abono. Nunca toca montos ni la frecuencia.
 --
 -- La matemática de fechas vive en lib/finance/fixed-days.ts y
 -- lib/finance/reschedule.ts. Aquí se REVALIDA lo que manda la app (no se
@@ -29,74 +43,118 @@
 -- =========================================================================
 alter table public.loans
   add column schedule_type text not null default 'interval',
-  add column payment_days smallint[];
+  add column payment_days smallint[],
+  add column payment_weekday smallint;
 
--- Reglas (idénticas a validatePaymentDays en lib/finance/fixed-days.ts):
---  - 'interval'   -> payment_days NULL
---  - 'fixed_days' -> 1 o 2 días, entre 1 y 31, ordenados ascendente (sin repetir),
---                    y si son 2, no pueden ser ambos >= 28.
+-- Reglas idénticas a validateFixedSchedule en lib/finance/fixed-days.ts.
 alter table public.loans
   add constraint loans_schedule_type_check
     check (schedule_type in ('interval', 'fixed_days')),
-  add constraint loans_payment_days_check check (
-    (schedule_type = 'interval' and payment_days is null)
+  add constraint loans_schedule_check check (
+    (schedule_type = 'interval' and payment_days is null and payment_weekday is null)
     or (
       schedule_type = 'fixed_days'
+      and frequency = 'weekly'
+      and payment_days is null
+      and payment_weekday between 1 and 7
+    )
+    or (
+      schedule_type = 'fixed_days'
+      and frequency in ('monthly', 'biweekly')
+      and payment_weekday is null
       and payment_days is not null
       and array_ndims(payment_days) = 1
       and array_lower(payment_days, 1) = 1
-      and cardinality(payment_days) between 1 and 2
       and array_position(payment_days, null) is null
       and 1 <= all (payment_days)
       and 31 >= all (payment_days)
       and (
-        cardinality(payment_days) = 1
-        or (payment_days[1] < payment_days[2] and payment_days[1] < 28)
+        (frequency = 'monthly' and cardinality(payment_days) = 1)
+        or (
+          frequency = 'biweekly'
+          and cardinality(payment_days) = 2
+          and payment_days[1] < payment_days[2]
+          and payment_days[1] < 28
+        )
       )
     )
   );
 
 comment on column public.loans.schedule_type is
-  'Tipo de calendario: interval (cada período según frequency, comportamiento original) o fixed_days (días fijos del mes)';
+  'Fechas de pago: interval = Automático (cada período según frequency, comportamiento original); fixed_days = Día fijo';
 comment on column public.loans.payment_days is
-  'Días fijos del mes (1 o 2, ordenados) cuando schedule_type = fixed_days; NULL en interval';
+  'Día fijo del mes: 1 día (frequency monthly) o 2 días ordenados (biweekly). NULL en interval y en weekly';
+comment on column public.loans.payment_weekday is
+  'Día fijo de la semana (frequency weekly): 1 = lunes … 7 = domingo (ISO). NULL en los demás casos';
 
 -- =========================================================================
 -- 2) Helpers (internos; solo se usan desde las RPC de abajo)
 -- =========================================================================
 
--- Mensaje de error si los días no son válidos, o NULL si lo son.
-create or replace function public.payment_days_error(p_days smallint[])
+-- Mensaje de error si el día fijo no coincide con la frecuencia, o NULL si
+-- es válido. Igual a validateFixedSchedule() en lib/finance/fixed-days.ts.
+create or replace function public.fixed_schedule_error(
+  p_frequency public.loan_frequency,
+  p_days smallint[],
+  p_weekday smallint
+)
 returns text
 language plpgsql
 immutable
 set search_path = public, pg_temp
 as $$
+declare
+  v_count integer := coalesce(cardinality(p_days), 0);
 begin
-  if p_days is null or cardinality(p_days) = 0 then
-    return 'Elige al menos un día de pago';
+  if p_frequency is null then
+    return 'Frecuencia inválida';
+  end if;
+
+  if p_frequency = 'daily' then
+    return 'La frecuencia diaria no permite día fijo; usa Automático';
+  end if;
+
+  if p_frequency = 'weekly' then
+    if v_count > 0 then
+      return 'Con frecuencia semanal se elige un día de la semana, no días del mes';
+    end if;
+    if p_weekday is null then
+      return 'Elige el día de la semana';
+    end if;
+    if p_weekday < 1 or p_weekday > 7 then
+      return 'Día de la semana inválido';
+    end if;
+    return null;
+  end if;
+
+  -- monthly / biweekly
+  if p_weekday is not null then
+    return 'El día de la semana solo aplica a la frecuencia semanal';
+  end if;
+  if p_frequency = 'monthly' and v_count <> 1 then
+    return 'Con frecuencia mensual se elige 1 día del mes';
+  end if;
+  if p_frequency = 'biweekly' and v_count <> 2 then
+    return 'Con frecuencia quincenal se eligen 2 días del mes (por ejemplo 5 y 20)';
   end if;
   if array_ndims(p_days) <> 1 or array_position(p_days, null) is not null then
     return 'Días de pago inválidos';
   end if;
-  if cardinality(p_days) > 2 then
-    return 'Elige como máximo 2 días de pago';
-  end if;
   if not (1 <= all (p_days) and 31 >= all (p_days)) then
     return 'Los días de pago deben estar entre 1 y 31';
   end if;
-  if cardinality(p_days) = 2 and p_days[array_lower(p_days, 1)] = p_days[array_upper(p_days, 1)] then
+  if v_count = 2 and p_days[array_lower(p_days, 1)] = p_days[array_upper(p_days, 1)] then
     return 'Los días de pago no se pueden repetir';
   end if;
-  if cardinality(p_days) = 2 and 28 <= all (p_days) then
+  if v_count = 2 and 28 <= all (p_days) then
     return 'No se pueden elegir dos días de 28 en adelante (por ejemplo 29 y 30, o 30 y 31)';
   end if;
   return null;
 end;
 $$;
 
--- Siguiente día fijo ESTRICTAMENTE posterior a p_after. Si el mes no tiene
--- ese día, cae el último día del mes. Igual a nextFixedDay() en lib/finance.
+-- Siguiente día del mes ESTRICTAMENTE posterior a p_after. Si el mes no
+-- tiene ese día, cae el último día del mes. Igual a nextFixedDay().
 create or replace function public.fixed_day_after(p_after date, p_days smallint[])
 returns date
 language plpgsql
@@ -128,6 +186,22 @@ begin
 end;
 $$;
 
+-- Siguiente fecha del día fijo (del mes o de la semana), ESTRICTAMENTE
+-- posterior a p_after. Igual a nextScheduledDate() en lib/finance.
+-- isodow: 1 = lunes … 7 = domingo.
+create or replace function public.fixed_schedule_next(p_after date, p_days smallint[], p_weekday smallint)
+returns date
+language sql
+immutable
+set search_path = public, pg_temp
+as $$
+  select case
+    when p_weekday is not null
+      then p_after + (((p_weekday - extract(isodow from p_after)::integer + 6) % 7) + 1)
+    else public.fixed_day_after(p_after, p_days)
+  end;
+$$;
+
 -- Suma n períodos según la frecuencia. Igual a addPeriod() en
 -- lib/finance/frequency.ts (mensual ajusta a fin de mes como date-fns).
 create or replace function public.loan_add_period(p_date date, p_frequency public.loan_frequency, p_periods integer)
@@ -146,10 +220,10 @@ $$;
 
 -- =========================================================================
 -- 3) create_loan_with_schedule
--- Mismos parámetros que create_loan_with_installments + calendario.
+-- Mismos parámetros que create_loan_with_installments + día fijo.
 -- Llama a la RPC original (sin modificarla) y, en la MISMA transacción,
--- guarda schedule_type/payment_days. Si algo falla, se revierte todo,
--- incluido el préstamo.
+-- guarda schedule_type / payment_days / payment_weekday. Si algo falla, se
+-- revierte todo, incluido el préstamo.
 -- =========================================================================
 create or replace function public.create_loan_with_schedule(
   p_client_id uuid,
@@ -166,7 +240,8 @@ create or replace function public.create_loan_with_schedule(
   p_notes text,
   p_installments jsonb,
   p_schedule_type text,
-  p_payment_days smallint[]
+  p_payment_days smallint[],
+  p_payment_weekday smallint
 )
 returns public.loans
 language plpgsql
@@ -181,22 +256,24 @@ declare
   v_inst record;
 begin
   if p_schedule_type is null or p_schedule_type not in ('interval', 'fixed_days') then
-    raise exception 'Tipo de calendario inválido';
+    raise exception 'Tipo de fechas de pago inválido';
   end if;
 
   if p_schedule_type = 'fixed_days' then
-    v_error := public.payment_days_error(p_payment_days);
+    v_error := public.fixed_schedule_error(p_frequency, p_payment_days, p_payment_weekday);
     if v_error is not null then
       raise exception '%', v_error;
     end if;
-    select array_agg(d order by d) into v_days from unnest(p_payment_days) as d;
-
-    if p_first_payment_date <> public.fixed_day_after(p_start_date, v_days) then
-      raise exception 'La primera cuota debe ser el siguiente día fijo después de la fecha del préstamo (%)',
-        public.fixed_day_after(p_start_date, v_days);
+    if p_payment_weekday is null then
+      select array_agg(d order by d) into v_days from unnest(p_payment_days) as d;
     end if;
-  elsif p_payment_days is not null then
-    raise exception 'Los días fijos solo aplican al calendario de días fijos';
+
+    if p_first_payment_date <> public.fixed_schedule_next(p_start_date, v_days, p_payment_weekday) then
+      raise exception 'La primera cuota debe ser el siguiente día fijo después de la fecha del préstamo (%)',
+        public.fixed_schedule_next(p_start_date, v_days, p_payment_weekday);
+    end if;
+  elsif p_payment_days is not null or p_payment_weekday is not null then
+    raise exception 'El día fijo solo aplica con "Fechas de pago: Día fijo"';
   end if;
 
   v_loan := public.create_loan_with_installments(
@@ -206,7 +283,7 @@ begin
   );
 
   if p_schedule_type = 'fixed_days' then
-    -- Revalidar TODAS las fechas contra el calendario (no confiar en el cliente).
+    -- Revalidar TODAS las fechas contra el día fijo (no confiar en el cliente).
     v_expected := p_first_payment_date;
     for v_inst in
       select installment_number, due_date from public.installments
@@ -215,11 +292,11 @@ begin
       if v_inst.due_date <> v_expected then
         raise exception 'La cuota % debería vencer el %, no el %', v_inst.installment_number, v_expected, v_inst.due_date;
       end if;
-      v_expected := public.fixed_day_after(v_expected, v_days);
+      v_expected := public.fixed_schedule_next(v_expected, v_days, p_payment_weekday);
     end loop;
 
     update public.loans
-      set schedule_type = 'fixed_days', payment_days = v_days
+      set schedule_type = 'fixed_days', payment_days = v_days, payment_weekday = p_payment_weekday
       where id = v_loan.id
       returning * into v_loan;
   end if;
@@ -232,9 +309,12 @@ $$;
 -- 4) reschedule_loan_installments
 -- p_new_dates: jsonb array de { "installment_id": uuid, "due_date": "YYYY-MM-DD" }
 --   precalculado por lib/finance/reschedule.ts y revalidado aquí bajo lock.
--- p_schedule_type / p_payment_days: calendario resultante del préstamo.
---   - 'fixed_days': las fechas deben seguir exactamente esos días fijos.
+-- p_schedule_type / p_payment_days / p_payment_weekday: fechas de pago
+--   resultantes. La frecuencia NO cambia: el día fijo se valida contra
+--   loans.frequency.
+--   - 'fixed_days': las fechas deben seguir exactamente ese día fijo.
 --   - 'interval'  : las fechas deben seguir loans.frequency desde la primera.
+-- La primera fecha nueva no puede ser anterior a hoy (hora de RD).
 -- Solo admin/supervisor. Motivo obligatorio (mínimo 10 caracteres, igual
 -- que anular recibo). Una sola transacción; orden de locks igual que
 -- register_payment (primero loans, luego installments) para evitar
@@ -244,6 +324,7 @@ create or replace function public.reschedule_loan_installments(
   p_loan_id uuid,
   p_schedule_type text,
   p_payment_days smallint[],
+  p_payment_weekday smallint,
   p_new_dates jsonb,
   p_reason text
 )
@@ -253,9 +334,11 @@ security definer
 set search_path = public, pg_temp
 as $$
 declare
+  v_today date := (now() at time zone 'America/Santo_Domingo')::date;
   v_role public.user_role;
   v_loan public.loans;
   v_days smallint[];
+  v_weekday smallint;
   v_error text;
   v_reason text;
   v_movable_count integer;
@@ -287,18 +370,11 @@ begin
     raise exception 'El motivo del cambio debe tener al menos 10 caracteres';
   end if;
 
-  -- Calendario
   if p_schedule_type is null or p_schedule_type not in ('interval', 'fixed_days') then
-    raise exception 'Tipo de calendario inválido';
+    raise exception 'Tipo de fechas de pago inválido';
   end if;
-  if p_schedule_type = 'fixed_days' then
-    v_error := public.payment_days_error(p_payment_days);
-    if v_error is not null then
-      raise exception '%', v_error;
-    end if;
-    select array_agg(d order by d) into v_days from unnest(p_payment_days) as d;
-  elsif p_payment_days is not null then
-    raise exception 'Los días fijos solo aplican al calendario de días fijos';
+  if p_schedule_type = 'interval' and (p_payment_days is not null or p_payment_weekday is not null) then
+    raise exception 'El día fijo solo aplica con "Fechas de pago: Día fijo"';
   end if;
 
   if p_new_dates is null or jsonb_typeof(p_new_dates) <> 'array' then
@@ -312,6 +388,18 @@ begin
   end if;
   if v_loan.status <> 'activo' then
     raise exception 'Solo se puede cambiar la fecha de un préstamo activo';
+  end if;
+
+  -- Día fijo: debe coincidir con la frecuencia del préstamo (que no cambia).
+  if p_schedule_type = 'fixed_days' then
+    v_error := public.fixed_schedule_error(v_loan.frequency, p_payment_days, p_payment_weekday);
+    if v_error is not null then
+      raise exception '%', v_error;
+    end if;
+    v_weekday := p_payment_weekday;
+    if v_weekday is null then
+      select array_agg(d order by d) into v_days from unnest(p_payment_days) as d;
+    end if;
   end if;
 
   -- Lock de TODAS las cuotas del préstamo
@@ -335,7 +423,7 @@ begin
     raise exception 'Hay cuotas pendientes anteriores a cuotas ya pagadas; no se puede reprogramar automáticamente';
   end if;
 
-  -- El input debe cubrir EXACTAMENTE las cuotas movibles, sin repetir
+  -- El input debe cubrir EXACTAMENTE las cuotas movibles, sin repetir.
   -- Solo se acepta AAAA-MM-DD: Postgres interpretaría "10/12/2026" como
   -- 12 de octubre (DateStyle MDY), lo cual sería un error silencioso.
   if exists (
@@ -385,17 +473,21 @@ begin
   loop
     if v_idx = 0 then
       v_first := v_row.new_date;
+      if v_row.new_date < v_today then
+        raise exception 'La nueva primera fecha no puede estar en el pasado (hoy es %)', v_today;
+      end if;
       if v_last_locked_date is not null and v_row.new_date <= v_last_locked_date then
         raise exception 'La nueva primera fecha debe ser posterior a % (última cuota pagada o con abono)', v_last_locked_date;
       end if;
       if p_schedule_type = 'fixed_days'
-         and v_row.new_date <> public.fixed_day_after(v_row.new_date - 1, v_days) then
-        raise exception 'La fecha % no corresponde a los días fijos elegidos', v_row.new_date;
+         and v_row.new_date <> public.fixed_schedule_next(v_row.new_date - 1, v_days, v_weekday) then
+        raise exception 'La fecha % no corresponde al día fijo elegido', v_row.new_date;
       end if;
     else
       if p_schedule_type = 'fixed_days' then
-        if v_row.new_date <> public.fixed_day_after(v_prev, v_days) then
-          raise exception 'La cuota % debería vencer el %', v_row.installment_number, public.fixed_day_after(v_prev, v_days);
+        if v_row.new_date <> public.fixed_schedule_next(v_prev, v_days, v_weekday) then
+          raise exception 'La cuota % debería vencer el %', v_row.installment_number,
+            public.fixed_schedule_next(v_prev, v_days, v_weekday);
         end if;
       else
         if v_row.new_date <> public.loan_add_period(v_first, v_loan.frequency, v_idx) then
@@ -414,11 +506,11 @@ begin
     v_idx := v_idx + 1;
   end loop;
 
-  -- Aplicar: SOLO due_date (y vencida -> pendiente si la nueva fecha no está vencida)
+  -- Aplicar: SOLO due_date (y vencida -> pendiente si la nueva fecha ya no está vencida, en hora de RD)
   update public.installments i set
     due_date = r.new_date,
     status = case
-      when i.status = 'vencida' and r.new_date >= current_date then 'pendiente'::public.installment_status
+      when i.status = 'vencida' and r.new_date >= v_today then 'pendiente'::public.installment_status
       else i.status
     end
   from unnest(v_input_ids, v_input_dates) as r(installment_id, new_date)
@@ -437,10 +529,10 @@ begin
 
   v_detail := jsonb_build_object(
     'motivo', v_reason,
-    'calendario_antes', jsonb_build_object('tipo', v_loan.schedule_type, 'dias', to_jsonb(v_loan.payment_days),
-                                           'frecuencia', v_loan.frequency),
-    'calendario_despues', jsonb_build_object('tipo', p_schedule_type, 'dias', to_jsonb(v_days),
-                                             'frecuencia', v_loan.frequency),
+    'fechas_antes', jsonb_build_object('tipo', v_loan.schedule_type, 'dias', to_jsonb(v_loan.payment_days),
+                                       'dia_semana', v_loan.payment_weekday, 'frecuencia', v_loan.frequency),
+    'fechas_despues', jsonb_build_object('tipo', p_schedule_type, 'dias', to_jsonb(v_days),
+                                         'dia_semana', v_weekday, 'frecuencia', v_loan.frequency),
     'proximo_pago_antes', v_loan.next_payment_date,
     'proximo_pago_despues', v_next_payment,
     'cuotas', v_changes
@@ -449,6 +541,7 @@ begin
   update public.loans set
     schedule_type = p_schedule_type,
     payment_days = v_days,
+    payment_weekday = v_weekday,
     next_payment_date = v_next_payment
   where id = p_loan_id;
 
@@ -466,18 +559,19 @@ $$;
 -- de cada RPC. Los helpers no se exponen (se usan desde funciones
 -- SECURITY DEFINER, que corren como su dueño).
 -- =========================================================================
-revoke execute on function public.payment_days_error(smallint[]) from public, anon, authenticated;
+revoke execute on function public.fixed_schedule_error(public.loan_frequency, smallint[], smallint) from public, anon, authenticated;
 revoke execute on function public.fixed_day_after(date, smallint[]) from public, anon, authenticated;
+revoke execute on function public.fixed_schedule_next(date, smallint[], smallint) from public, anon, authenticated;
 revoke execute on function public.loan_add_period(date, public.loan_frequency, integer) from public, anon, authenticated;
 
 revoke execute on function public.create_loan_with_schedule(
   uuid, numeric, numeric, public.loan_interest_type, integer, numeric, numeric, numeric,
-  public.loan_frequency, date, date, text, jsonb, text, smallint[]
+  public.loan_frequency, date, date, text, jsonb, text, smallint[], smallint
 ) from public, anon;
-revoke execute on function public.reschedule_loan_installments(uuid, text, smallint[], jsonb, text) from public, anon;
+revoke execute on function public.reschedule_loan_installments(uuid, text, smallint[], smallint, jsonb, text) from public, anon;
 
 grant execute on function public.create_loan_with_schedule(
   uuid, numeric, numeric, public.loan_interest_type, integer, numeric, numeric, numeric,
-  public.loan_frequency, date, date, text, jsonb, text, smallint[]
+  public.loan_frequency, date, date, text, jsonb, text, smallint[], smallint
 ) to authenticated;
-grant execute on function public.reschedule_loan_installments(uuid, text, smallint[], jsonb, text) to authenticated;
+grant execute on function public.reschedule_loan_installments(uuid, text, smallint[], smallint, jsonb, text) to authenticated;

@@ -15,6 +15,10 @@
  *    la tabla loans (migración 0011) y en la validación del servidor.
  */
 
+import type { LoanFrequency } from "@/types/database.types"
+import { addDaysIso, isoWeekday } from "../utils/date"
+import { FREQUENCY_LABELS } from "./frequency"
+
 export type ScheduleType = "interval" | "fixed_days"
 
 export const MAX_PAYMENT_DAYS = 2
@@ -118,4 +122,137 @@ export function buildFixedDaySchedule(afterIso: string, days: readonly number[],
 export function formatPaymentDays(days: readonly number[]): string {
   const sorted = normalizePaymentDays(days)
   return sorted.length === 1 ? `Día ${sorted[0]}` : `Días ${sorted.join(" y ")}`
+}
+
+// ===========================================================================
+// "Día fijo" según la frecuencia (elegida por el usuario, nunca deducida)
+//   - Mensual:   1 día del mes (payment_days = [d])
+//   - Quincenal: 2 días del mes (payment_days = [a, b], a < b, no ambos >= 28)
+//   - Semanal:   1 día de la semana (payment_weekday 1 = lunes … 7 = domingo)
+//   - Diaria:    no admite día fijo (solo Automático)
+// Mismas reglas en el servidor (Zod) y en la BD (check loans_schedule_check
+// y fixed_schedule_error, migración 0011).
+// ===========================================================================
+
+/** Día fijo de un préstamo: días del mes (mensual/quincenal) o día de la semana (semanal). */
+export interface FixedSchedule {
+  days: number[]
+  weekday: number | null
+}
+
+export const WEEKDAY_LABELS: Record<number, string> = {
+  1: "Lunes",
+  2: "Martes",
+  3: "Miércoles",
+  4: "Jueves",
+  5: "Viernes",
+  6: "Sábado",
+  7: "Domingo",
+}
+
+/** Cantidad de días del mes que exige cada frecuencia con "Día fijo". */
+export const FIXED_DAYS_BY_FREQUENCY = { monthly: 1, biweekly: 2 } as const
+
+/** Etiqueta del campo "Día fijo" según la frecuencia. */
+export const FIXED_DAY_LABELS: Record<LoanFrequency, string> = {
+  daily: "Día fijo",
+  weekly: "Día de la semana",
+  biweekly: "Días del mes (2)",
+  monthly: "Día del mes",
+}
+
+/** Ayuda bajo el campo "Día fijo" según la frecuencia. */
+export const FIXED_DAY_HINTS: Record<LoanFrequency, string> = {
+  daily: "La frecuencia diaria no permite día fijo.",
+  weekly: "Cada cuota cae ese día de la semana.",
+  biweekly:
+    "Dos días del mes, por ejemplo 5 y 20. No pueden ser los dos del 28 en adelante. Si el mes no tiene ese día, la cuota cae el último día del mes.",
+  monthly: "Del 1 al 31. Si el mes no tiene ese día, la cuota cae el último día del mes.",
+}
+
+export function fixedScheduleAllowed(frequency: LoanFrequency): boolean {
+  return frequency !== "daily"
+}
+
+/** Mensaje de error si el día fijo no coincide con la frecuencia, o null si es válido. */
+export function validateFixedSchedule(
+  frequency: LoanFrequency,
+  days: readonly number[],
+  weekday: number | null | undefined
+): string | null {
+  switch (frequency) {
+    case "daily":
+      return "La frecuencia diaria no permite día fijo; usa Automático"
+    case "weekly":
+      if (days.length > 0) return "Con frecuencia semanal se elige un día de la semana, no días del mes"
+      if (weekday == null) return "Elige el día de la semana"
+      if (!Number.isInteger(weekday) || weekday < 1 || weekday > 7) return "Día de la semana inválido"
+      return null
+    case "monthly":
+    case "biweekly": {
+      if (weekday != null) return "El día de la semana solo aplica a la frecuencia semanal"
+      const required = FIXED_DAYS_BY_FREQUENCY[frequency]
+      if (days.length !== required) {
+        return frequency === "monthly"
+          ? "Con frecuencia mensual se elige 1 día del mes"
+          : "Con frecuencia quincenal se eligen 2 días del mes (por ejemplo 5 y 20)"
+      }
+      return validatePaymentDays(days)
+    }
+  }
+}
+
+function assertValidSchedule(schedule: FixedSchedule) {
+  if (schedule.weekday != null) {
+    if (!Number.isInteger(schedule.weekday) || schedule.weekday < 1 || schedule.weekday > 7) {
+      throw new Error("Día de la semana inválido")
+    }
+    if (schedule.days.length > 0) throw new Error("Día fijo inválido: días del mes y día de la semana a la vez")
+  } else {
+    assertValidDays(schedule.days)
+  }
+}
+
+/** Siguiente fecha con ese día de la semana, ESTRICTAMENTE posterior a `afterIso`. */
+export function nextWeekday(afterIso: string, weekday: number): string {
+  parseIso(afterIso)
+  const delta = ((weekday - isoWeekday(afterIso) + 6) % 7) + 1
+  return addDaysIso(afterIso, delta)
+}
+
+/** Siguiente fecha del día fijo (del mes o de la semana), estrictamente posterior a `afterIso`. */
+export function nextScheduledDate(afterIso: string, schedule: FixedSchedule): string {
+  assertValidSchedule(schedule)
+  return schedule.weekday != null ? nextWeekday(afterIso, schedule.weekday) : nextFixedDay(afterIso, schedule.days)
+}
+
+/** `count` fechas de cuota con día fijo, todas posteriores a `afterIso`. */
+export function buildFixedSchedule(afterIso: string, schedule: FixedSchedule, count: number): string[] {
+  if (!Number.isInteger(count) || count <= 0) throw new Error("El número de cuotas debe ser mayor a cero")
+  const dates: string[] = []
+  let cursor = afterIso
+  for (let i = 0; i < count; i++) {
+    cursor = nextScheduledDate(cursor, schedule)
+    dates.push(cursor)
+  }
+  return dates
+}
+
+/** "Día 5 de cada mes", "Días 5 y 20 de cada mes" o "Cada lunes". */
+export function formatFixedSchedule(schedule: { days: readonly number[] | null; weekday: number | null }): string {
+  if (schedule.weekday != null) return `Cada ${(WEEKDAY_LABELS[schedule.weekday] ?? "").toLowerCase()}`
+  return `${formatPaymentDays(schedule.days ?? [])} de cada mes`
+}
+
+/** Etiqueta del calendario de un préstamo: "Mensual" o "Quincenal · días 5 y 20 de cada mes". */
+export function formatLoanSchedule(loan: {
+  frequency: LoanFrequency
+  schedule_type: ScheduleType
+  payment_days: readonly number[] | null
+  payment_weekday: number | null
+}): string {
+  const base = FREQUENCY_LABELS[loan.frequency]
+  if (loan.schedule_type !== "fixed_days") return base
+  const detail = formatFixedSchedule({ days: loan.payment_days, weekday: loan.payment_weekday })
+  return `${base} · ${detail.charAt(0).toLowerCase()}${detail.slice(1)}`
 }

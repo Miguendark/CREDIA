@@ -1,5 +1,5 @@
 import type { InstallmentStatus, LoanFrequency } from "@/types/database.types"
-import { buildFixedDaySchedule, validatePaymentDays } from "./fixed-days"
+import { buildFixedSchedule, normalizePaymentDays, validateFixedSchedule } from "./fixed-days"
 import { addPeriod } from "./frequency"
 
 /**
@@ -22,8 +22,11 @@ export interface RescheduleInstallment {
 }
 
 export type RescheduleMode =
-  /** Días fijos del mes; la primera cuota es el siguiente día fijo después de `afterDate`. */
-  | { type: "fixed_days"; days: number[]; afterDate: string }
+  /**
+   * Día fijo: días del mes (`days`) o día de la semana (`weekday`, 1 = lunes … 7 = domingo).
+   * La primera cuota es el siguiente día fijo después de `afterDate`.
+   */
+  | { type: "fixed_days"; days: number[]; weekday?: number | null; afterDate: string }
   /** Mantiene la frecuencia: la próxima cuota pendiente cae en `firstDate` y las demás siguen la frecuencia. */
   | { type: "interval"; frequency: LoanFrequency; firstDate: string }
 
@@ -61,9 +64,7 @@ export function planReschedule(installments: readonly RescheduleInstallment[], m
 
   let newDates: string[]
   if (mode.type === "fixed_days") {
-    const error = validatePaymentDays(mode.days)
-    if (error) throw new Error(error)
-    newDates = buildFixedDaySchedule(mode.afterDate, mode.days, movable.length)
+    newDates = buildFixedSchedule(mode.afterDate, { days: mode.days, weekday: mode.weekday ?? null }, movable.length)
   } else {
     newDates = movable.map((_, index) => (index === 0 ? mode.firstDate : addPeriod(mode.firstDate, mode.frequency, index)))
   }
@@ -86,6 +87,61 @@ export function planReschedule(installments: readonly RescheduleInstallment[], m
   ].sort()
 
   return { changes, nextPaymentDate: openDates[0] ?? null }
+}
+
+export interface LoanRescheduleRequest {
+  schedule_type: "interval" | "fixed_days"
+  payment_days: number[]
+  payment_weekday: number | null
+  /** fixed_days: siguiente día fijo después de esta fecha. interval: fecha de la próxima cuota. */
+  start_from: string
+}
+
+/**
+ * Plan a partir de filas de `installments` tal como vienen de la BD. Lo usan
+ * el diálogo (vista previa) y el servidor (recalcula antes de llamar a la RPC).
+ */
+export function buildLoanReschedulePlan(
+  frequency: LoanFrequency,
+  installments: readonly { id: string; installment_number: number; due_date: string; status: InstallmentStatus; amount_paid: number }[],
+  request: LoanRescheduleRequest
+): ReschedulePlan {
+  if (request.schedule_type === "fixed_days") {
+    // La frecuencia es la del préstamo (no se cambia aquí); el día fijo debe coincidir con ella.
+    const error = validateFixedSchedule(frequency, request.payment_days, request.payment_weekday)
+    if (error) throw new Error(error)
+  }
+  return planReschedule(
+    installments.map((i) => ({
+      id: i.id,
+      installment_number: i.installment_number,
+      due_date: i.due_date,
+      status: i.status,
+      amount_paid: Number(i.amount_paid),
+    })),
+    request.schedule_type === "fixed_days"
+      ? {
+          type: "fixed_days",
+          days: normalizePaymentDays(request.payment_days),
+          weekday: request.payment_weekday,
+          afterDate: request.start_from,
+        }
+      : { type: "interval", frequency, firstDate: request.start_from }
+  )
+}
+
+/**
+ * Fecha "a partir de" por defecto: hoy, o la última cuota pagada/con abono
+ * si es posterior (las fechas nuevas deben quedar después de ella).
+ */
+export function defaultRescheduleStart(
+  installments: readonly { due_date: string; status: InstallmentStatus; amount_paid: number }[],
+  today: string
+): string {
+  const lastLocked = installments
+    .filter((i) => !isReschedulable({ id: "", installment_number: 0, ...i }))
+    .reduce((max, i) => (i.due_date > max ? i.due_date : max), "")
+  return lastLocked > today ? lastLocked : today
 }
 
 /**

@@ -15,6 +15,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import {
   Form,
   FormControl,
+  FormDescription,
   FormField,
   FormItem,
   FormLabel,
@@ -22,15 +23,26 @@ import {
 } from "@/components/ui/form"
 import { Separator } from "@/components/ui/separator"
 import { ClientCombobox } from "@/components/shared/client-combobox"
+import { FixedDayInput } from "@/components/loans/fixed-day-input"
 import { loanSchema, type LoanInput } from "@/lib/validations/loan"
 import { calculateLoan } from "@/lib/finance/loan-calculator"
 import { addPeriod, FREQUENCY_LABELS } from "@/lib/finance/frequency"
+import {
+  FIXED_DAY_HINTS,
+  FIXED_DAY_LABELS,
+  fixedScheduleAllowed,
+  formatLoanSchedule,
+  nextScheduledDate,
+  normalizePaymentDays,
+  validateFixedSchedule,
+} from "@/lib/finance/fixed-days"
+import { todayRD } from "@/lib/utils/date"
 import { INTEREST_TYPE_LABELS } from "@/lib/finance/loan-calculator"
 import { formatCurrency, formatDate } from "@/lib/utils/format"
 import { createLoanAction } from "@/app/(app)/prestamos/actions"
 import type { LoanFrequency, LoanInterestType } from "@/types/database.types"
 
-const today = new Date().toISOString().slice(0, 10)
+const NO_DAYS: number[] = []
 
 export function LoanForm({
   preselectedClientId,
@@ -40,6 +52,7 @@ export function LoanForm({
   preselectedClientLabel?: string
 }) {
   const router = useRouter()
+  const [today] = useState(todayRD)
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [firstPaymentTouched, setFirstPaymentTouched] = useState(false)
 
@@ -52,32 +65,75 @@ export function LoanForm({
       interest_rate: 10,
       number_of_installments: 4,
       frequency: "monthly",
+      schedule_type: "interval",
+      payment_days: [],
+      payment_weekday: null,
       start_date: today,
       first_payment_date: addPeriod(today, "monthly"),
       notes: "",
     },
   })
 
-  const [principal, interestRate, interestType, numberOfInstallments, frequency, startDate, firstPaymentDate] =
-    form.watch([
-      "principal_amount",
-      "interest_rate",
-      "interest_type",
-      "number_of_installments",
-      "frequency",
-      "start_date",
-      "first_payment_date",
-    ])
+  const [
+    principal,
+    interestRate,
+    interestType,
+    numberOfInstallments,
+    frequency,
+    scheduleType,
+    watchedPaymentDays,
+    watchedPaymentWeekday,
+    startDate,
+    firstPaymentDate,
+  ] = form.watch([
+    "principal_amount",
+    "interest_rate",
+    "interest_type",
+    "number_of_installments",
+    "frequency",
+    "schedule_type",
+    "payment_days",
+    "payment_weekday",
+    "start_date",
+    "first_payment_date",
+  ])
+
+  const paymentDays = watchedPaymentDays ?? NO_DAYS
+  const paymentWeekday = watchedPaymentWeekday ?? null
+  const isFixedDays = scheduleType === "fixed_days"
+  const fixedAllowed = fixedScheduleAllowed(frequency as LoanFrequency)
+  const fixedError = isFixedDays ? validateFixedSchedule(frequency as LoanFrequency, paymentDays, paymentWeekday) : null
+  const fixedSchedule = useMemo(
+    () => ({ days: normalizePaymentDays(paymentDays), weekday: paymentWeekday }),
+    [paymentDays, paymentWeekday]
+  )
 
   useEffect(() => {
-    if (firstPaymentTouched || !startDate) return
+    if (!startDate) return
+    if (isFixedDays) {
+      // Con día fijo la primera cuota se calcula sola (la frecuencia la elige el usuario).
+      if (fixedError) return
+      form.setValue("first_payment_date", nextScheduledDate(startDate, fixedSchedule))
+      return
+    }
+    if (firstPaymentTouched) return
     form.setValue("first_payment_date", addPeriod(startDate, frequency as LoanFrequency))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startDate, frequency])
+  }, [startDate, frequency, isFixedDays, fixedError, fixedSchedule])
+
+  /** Al cambiar la frecuencia se borra el día fijo (no sirve para la nueva); diaria vuelve a Automático. */
+  function handleFrequencyChange(next: LoanFrequency) {
+    form.setValue("frequency", next)
+    form.setValue("payment_days", [])
+    form.setValue("payment_weekday", null)
+    if (!fixedScheduleAllowed(next)) form.setValue("schedule_type", "interval")
+    setFirstPaymentTouched(false)
+  }
 
   const calculation = useMemo(() => {
     if (!principal || principal <= 0 || !numberOfInstallments || numberOfInstallments <= 0) return null
     if (!firstPaymentDate) return null
+    if (isFixedDays && fixedError) return null
     try {
       return calculateLoan({
         principal: Number(principal),
@@ -86,11 +142,12 @@ export function LoanForm({
         numberOfInstallments: Number(numberOfInstallments),
         frequency: frequency as LoanFrequency,
         firstPaymentDate,
+        schedule: isFixedDays ? { type: "fixed_days", ...fixedSchedule } : undefined,
       })
     } catch {
       return null
     }
-  }, [principal, interestRate, interestType, numberOfInstallments, frequency, firstPaymentDate])
+  }, [principal, interestRate, interestType, numberOfInstallments, frequency, firstPaymentDate, isFixedDays, fixedError, fixedSchedule])
 
   async function onSubmit(values: LoanInput) {
     setIsSubmitting(true)
@@ -227,7 +284,11 @@ export function LoanForm({
               render={({ field }) => (
                 <FormItem>
                   <FormLabel>Frecuencia *</FormLabel>
-                  <Select value={field.value} onValueChange={field.onChange} disabled={isSubmitting}>
+                  <Select
+                    value={field.value}
+                    onValueChange={(value) => handleFrequencyChange(value as LoanFrequency)}
+                    disabled={isSubmitting}
+                  >
                     <FormControl>
                       <SelectTrigger className="w-full">
                         <SelectValue />
@@ -245,6 +306,63 @@ export function LoanForm({
                 </FormItem>
               )}
             />
+
+            <FormField
+              control={form.control}
+              name="schedule_type"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Fechas de pago *</FormLabel>
+                  <Select
+                    value={field.value}
+                    onValueChange={(value) => {
+                      field.onChange(value)
+                      form.setValue("payment_days", [])
+                      form.setValue("payment_weekday", null)
+                      setFirstPaymentTouched(false)
+                    }}
+                    disabled={isSubmitting}
+                  >
+                    <FormControl>
+                      <SelectTrigger className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value="interval">Automático</SelectItem>
+                      <SelectItem value="fixed_days" disabled={!fixedAllowed}>
+                        Día fijo
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  {!fixedAllowed && (
+                    <FormDescription>La frecuencia diaria no permite día fijo; solo Automático.</FormDescription>
+                  )}
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+
+            {isFixedDays && (
+              <FormItem className="sm:col-span-2">
+                <FormLabel>{FIXED_DAY_LABELS[frequency as LoanFrequency]} *</FormLabel>
+                <FixedDayInput
+                  key={frequency}
+                  frequency={frequency as LoanFrequency}
+                  value={fixedSchedule}
+                  onChange={(v) => {
+                    form.setValue("payment_days", v.days)
+                    form.setValue("payment_weekday", v.weekday)
+                  }}
+                  disabled={isSubmitting}
+                />
+                {fixedError ? (
+                  <p className="text-sm text-status-critical">{fixedError}</p>
+                ) : (
+                  <FormDescription>{FIXED_DAY_HINTS[frequency as LoanFrequency]}</FormDescription>
+                )}
+              </FormItem>
+            )}
 
             <FormField
               control={form.control}
@@ -270,13 +388,18 @@ export function LoanForm({
                     <Input
                       type="date"
                       disabled={isSubmitting}
+                      readOnly={isFixedDays}
                       {...field}
                       onChange={(e) => {
+                        if (isFixedDays) return
                         setFirstPaymentTouched(true)
                         field.onChange(e)
                       }}
                     />
                   </FormControl>
+                  {isFixedDays && (
+                    <FormDescription>Se calcula solo: el siguiente día fijo después de la fecha de inicio.</FormDescription>
+                  )}
                   <FormMessage />
                 </FormItem>
               )}
@@ -315,6 +438,19 @@ export function LoanForm({
                   <SummaryRow label="Total a pagar" value={formatCurrency(calculation.totalAmount)} strong />
                   <Separator />
                   <SummaryRow label="Cuotas" value={String(numberOfInstallments)} />
+                  <SummaryRow
+                    label="Calendario"
+                    value={
+                      isFixedDays
+                        ? formatLoanSchedule({
+                            frequency: frequency as LoanFrequency,
+                            schedule_type: "fixed_days",
+                            payment_days: fixedSchedule.days,
+                            payment_weekday: fixedSchedule.weekday,
+                          })
+                        : `${FREQUENCY_LABELS[frequency as LoanFrequency]} · automático`
+                    }
+                  />
                   <SummaryRow label="Valor de cuota" value={formatCurrency(calculation.installmentAmount)} strong />
                   <Separator />
                   <div>

@@ -20,6 +20,8 @@ export type LoanStatus = "activo" | "pagado" | "vencido" | "cancelado"
 export type InstallmentStatus = "pendiente" | "parcial" | "pagada" | "vencida"
 export type PaymentMethod = "efectivo" | "transferencia" | "deposito" | "tarjeta" | "otro"
 export type CapitalTransactionType = "aporte" | "retiro" | "prestamo" | "pago" | "ajuste"
+/** Migración 0011: 'interval' = Automático (por frecuencia); 'fixed_days' = Día fijo. */
+export type LoanScheduleType = "interval" | "fixed_days"
 export type WhatsappConversationStatus = "pendiente" | "atendida" | "cerrada"
 export type WhatsappMessageSender = "cliente" | "agente" | "bot"
 export type ReceiptStatus = "activo" | "anulado"
@@ -104,6 +106,11 @@ export interface Database {
           number_of_installments: number
           installment_amount: number
           frequency: LoanFrequency
+          schedule_type: LoanScheduleType
+          /** Día fijo mensual (1 día) o quincenal (2 días, ordenados). NULL en 'interval' y en semanal. */
+          payment_days: number[] | null
+          /** Día fijo semanal: 1 = lunes … 7 = domingo. NULL en los demás casos. */
+          payment_weekday: number | null
           start_date: string
           first_payment_date: string
           next_payment_date: string | null
@@ -361,6 +368,27 @@ export interface Database {
           p_installments: unknown
         }
         Returns: Database["public"]["Tables"]["loans"]["Row"]
+      }
+      /** Migración 0011: create_loan_with_installments + calendario (misma transacción). */
+      create_loan_with_schedule: {
+        Args: Database["public"]["Functions"]["create_loan_with_installments"]["Args"] & {
+          p_schedule_type: LoanScheduleType
+          p_payment_days: number[] | null
+          p_payment_weekday: number | null
+        }
+        Returns: Database["public"]["Tables"]["loans"]["Row"]
+      }
+      /** Migración 0011: solo admin/supervisor. Cambia SOLO due_date de cuotas sin abono. */
+      reschedule_loan_installments: {
+        Args: {
+          p_loan_id: string
+          p_schedule_type: LoanScheduleType
+          p_payment_days: number[] | null
+          p_payment_weekday: number | null
+          p_new_dates: unknown
+          p_reason: string
+        }
+        Returns: unknown
       }
       register_payment: {
         Args: {

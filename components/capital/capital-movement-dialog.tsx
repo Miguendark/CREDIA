@@ -29,8 +29,7 @@ import {
 } from "@/components/ui/form"
 import { capitalMovementSchema, type CapitalMovementInput } from "@/lib/validations/capital"
 import { registerCapitalMovementAction } from "@/app/(app)/capital/actions"
-
-const today = new Date().toISOString().slice(0, 10)
+import { todayRD } from "@/lib/utils/date"
 
 const TYPE_OPTIONS = [
   { value: "aporte", label: "Aporte de capital" },
@@ -39,6 +38,7 @@ const TYPE_OPTIONS = [
 ]
 
 export function CapitalMovementDialog() {
+  const today = todayRD()
   const router = useRouter()
   const [open, setOpen] = useState(false)
   const [isSubmitting, setIsSubmitting] = useState(false)
