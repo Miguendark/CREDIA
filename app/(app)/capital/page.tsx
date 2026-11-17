@@ -1,7 +1,9 @@
 import type { Metadata } from "next"
+import { notFound } from "next/navigation"
 import { HandCoins, PiggyBank, TrendingUp, Wallet } from "lucide-react"
 import { createClient } from "@/lib/supabase/server"
 import { getCapitalSummary, listCapitalMovements } from "@/services/capital.service"
+import { getCurrentStaffUser } from "@/services/users.service"
 import { PageHeader } from "@/components/shared/page-header"
 import { MetricCard } from "@/components/dashboard/metric-card"
 import { CapitalMovementDialog } from "@/components/capital/capital-movement-dialog"
@@ -22,6 +24,11 @@ export default async function CapitalPage({
   const { page: pageParam } = await searchParams
   const page = Math.max(1, Number(pageParam) || 1)
   const supabase = await createClient()
+
+  const staffUser = await getCurrentStaffUser(supabase)
+  if (!staffUser || !["admin", "supervisor"].includes(staffUser.role)) {
+    notFound()
+  }
 
   const [summary, movements] = await Promise.all([
     getCapitalSummary(supabase),

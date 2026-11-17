@@ -1,5 +1,6 @@
 import type { TypedSupabaseClient } from "@/lib/supabase/types"
 import type { DashboardMetrics, LoanStatusChartPoint, PaymentsChartPoint, PortfolioChartPoint } from "@/types/domain"
+import { todayRD } from "@/lib/utils/date"
 
 export async function getDashboardMetrics(supabase: TypedSupabaseClient): Promise<DashboardMetrics> {
   const { data, error } = await supabase.from("dashboard_metrics").select("*").single()
@@ -46,7 +47,7 @@ export async function getPaymentsChartData(supabase: TypedSupabaseClient): Promi
     .order("due_date", { ascending: true })
   if (error) throw error
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = todayRD()
   const buckets = new Map<string, PaymentsChartPoint>()
 
   for (const installment of installments) {
@@ -71,7 +72,7 @@ export async function getLoanStatusChartData(supabase: TypedSupabaseClient): Pro
   const { data: loans, error } = await supabase.from("loans").select("status, next_payment_date")
   if (error) throw error
 
-  const today = new Date().toISOString().slice(0, 10)
+  const today = todayRD()
   const counts: Record<string, number> = { Activos: 0, Vencidos: 0, Pagados: 0, Cancelados: 0 }
 
   for (const loan of loans) {

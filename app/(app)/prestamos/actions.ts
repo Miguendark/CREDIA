@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache"
 import { createClient as createSupabaseClient } from "@/lib/supabase/server"
-import { loanSchema, type LoanInput } from "@/lib/validations/loan"
+import { loanSchema, rescheduleLoanSchema, type LoanInput, type RescheduleLoanInput } from "@/lib/validations/loan"
 import * as loansService from "@/services/loans.service"
 
 export type LoanActionResult = { success: true; loanId: string } | { success: false; message: string }
@@ -45,6 +45,28 @@ export async function listActiveLoansByClientAction(clientId: string): Promise<L
 
   if (error) throw error
   return data
+}
+
+/** Cambiar fecha de pago. El rol (admin/supervisor) lo exige la RPC en la base de datos. */
+export async function rescheduleLoanAction(
+  input: RescheduleLoanInput
+): Promise<{ success: true } | { success: false; message: string }> {
+  const parsed = rescheduleLoanSchema.safeParse(input)
+  if (!parsed.success) {
+    return { success: false, message: parsed.error.issues[0]?.message ?? "Datos inválidos" }
+  }
+
+  try {
+    const supabase = await createSupabaseClient()
+    await loansService.rescheduleLoan(supabase, parsed.data)
+    revalidatePath("/prestamos")
+    revalidatePath(`/prestamos/${parsed.data.loan_id}`)
+    revalidatePath("/cobros")
+    revalidatePath("/dashboard")
+    return { success: true }
+  } catch (error) {
+    return { success: false, message: error instanceof Error ? error.message : "No se pudo cambiar la fecha de pago" }
+  }
 }
 
 export async function cancelLoanAction(id: string, reason: string): Promise<{ success: boolean; message?: string }> {

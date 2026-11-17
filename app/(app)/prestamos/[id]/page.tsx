@@ -15,9 +15,11 @@ import { LoanStatusBadge } from "@/components/shared/badges"
 import { InstallmentsTable } from "@/components/loans/installments-table"
 import { PaymentsTable } from "@/components/payments/payments-table"
 import { CancelLoanDialog } from "@/components/loans/cancel-loan-dialog"
+import { RescheduleLoanDialog } from "@/components/loans/reschedule-loan-dialog"
 import { formatCurrency, formatDate, formatPercent } from "@/lib/utils/format"
 import { INTEREST_TYPE_LABELS } from "@/lib/finance/loan-calculator"
-import { FREQUENCY_LABELS } from "@/lib/finance/frequency"
+import { formatLoanSchedule } from "@/lib/finance/fixed-days"
+import { isReschedulable } from "@/lib/finance/reschedule"
 import { isLoanOverdue } from "@/types/domain"
 
 export async function generateMetadata({ params }: { params: Promise<{ id: string }> }): Promise<Metadata> {
@@ -41,7 +43,14 @@ export default async function PrestamoDetailPage({ params }: { params: Promise<{
   ])
 
   const canCancel = loan.status === "activo"
-  const canVoidReceipts = staffUser?.role === "admin" || staffUser?.role === "supervisor"
+  const isAdminOrSupervisor = staffUser?.role === "admin" || staffUser?.role === "supervisor"
+  const canVoidReceipts = isAdminOrSupervisor
+  // La RPC vuelve a verificar rol y cuotas; esto solo decide si mostrar el botón.
+  const canReschedule =
+    isAdminOrSupervisor &&
+    loan.status === "activo" &&
+    installments.some((i) => isReschedulable({ ...i, amount_paid: Number(i.amount_paid) }))
+  const scheduleLabel = formatLoanSchedule(loan)
 
   return (
     <div className="space-y-6">
@@ -54,11 +63,12 @@ export default async function PrestamoDetailPage({ params }: { params: Promise<{
             </Link>
             {" · "}
             {INTEREST_TYPE_LABELS[loan.interest_type]} ({formatPercent(loan.interest_rate)}) ·{" "}
-            {FREQUENCY_LABELS[loan.frequency]}
+            {scheduleLabel}
           </>
         }
         action={
           <>
+            {canReschedule && <RescheduleLoanDialog loan={loan} installments={installments} />}
             {canCancel && <CancelLoanDialog loanId={loan.id} loanNumber={loan.loan_number} />}
             <Button asChild>
               <Link href={`/pagos/nuevo?loanId=${loan.id}`}>

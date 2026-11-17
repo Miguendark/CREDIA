@@ -1,5 +1,6 @@
 import type { TypedSupabaseClient } from "@/lib/supabase/types"
 import type { Installment } from "@/types/domain"
+import { addDaysIso, todayRD } from "@/lib/utils/date"
 
 export interface CollectionInstallment extends Installment {
   loan: {
@@ -37,8 +38,8 @@ export async function getCollectionsBuckets(supabase: TypedSupabaseClient): Prom
 
   if (error) throw error
 
-  const today = new Date().toISOString().slice(0, 10)
-  const in7Days = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+  const today = todayRD()
+  const in7Days = addDaysIso(today, 7)
 
   const items = data as unknown as CollectionInstallment[]
   const buckets: CollectionsBuckets = { dueToday: [], upcoming: [], overdue: [] }

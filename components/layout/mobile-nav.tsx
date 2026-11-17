@@ -6,8 +6,9 @@ import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { Logo } from "@/components/shared/logo"
 import { SidebarNav } from "./sidebar-nav"
+import type { UserRole } from "@/types/database.types"
 
-export function MobileNav() {
+export function MobileNav({ role }: { role: UserRole }) {
   const [open, setOpen] = useState(false)
 
   return (
@@ -25,7 +26,7 @@ export function MobileNav() {
           </SheetTitle>
         </SheetHeader>
         <div className="py-2">
-          <SidebarNav onNavigate={() => setOpen(false)} />
+          <SidebarNav role={role} onNavigate={() => setOpen(false)} />
         </div>
       </SheetContent>
     </Sheet>
