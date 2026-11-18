@@ -251,72 +251,16 @@ export interface CancelledLoanRow {
   notes: string | null
 }
 
-export interface CancelledLoan {
+// ---------------------------------------------------------------------------
+// Atraso por cliente
+// ---------------------------------------------------------------------------
+
+export interface LateLoan {
   loanId: string
   loanNumber: string
-  clientId: string
-  clientName: string
-  cancelledOn: string
-  principal: number
-  principalCollected: number
-  interestCollected: number
-  payments: number
-  /** Capital prestado − capital cobrado antes de cancelar. */
-  capitalLost: number
-  notes: string | null
-  inPeriod: boolean
-}
-
-export interface CancelledSummary {
-  /** Todos los cancelados hasta la fecha de cierre (la pérdida es acumulada). */
-  loans: number
-  capitalLost: number
-  /** Lo cobrado de esos préstamos antes de cancelarlos (capital + interés). */
-  collectedBefore: number
-  /** Cancelados dentro del período. */
-  periodLoans: number
-  periodCapitalLost: number
-  rows: CancelledLoan[]
-}
-
-/**
- * Pérdida por préstamos cancelados. Cuenta los cancelados hasta `to`
- * (incluido) y separa los del período [from, to]. Más recientes primero.
- */
-export function cancelledSummary(rows: readonly CancelledLoanRow[], from: string, to: string): CancelledSummary {
-  const list: CancelledLoan[] = rows
-    .map((r) => ({ ...r, cancelled_on: String(r.cancelled_on).slice(0, 10) }))
-    .filter((r) => r.cancelled_on <= to)
-    .map((r) => ({
-      loanId: r.loan_id,
-      loanNumber: r.loan_number,
-      clientId: r.client_id,
-      clientName: r.client_name,
-      cancelledOn: r.cancelled_on,
-      principal: r.principal_amount,
-      principalCollected: r.principal_collected,
-      interestCollected: r.interest_collected,
-      payments: r.payments,
-      capitalLost: r.capital_lost,
-      notes: r.notes,
-      inPeriod: r.cancelled_on >= from,
-    }))
-    .sort((a, b) =>
-      a.cancelledOn === b.cancelledOn
-        ? a.loanNumber.localeCompare(b.loanNumber)
-        : a.cancelledOn < b.cancelledOn
-          ? 1
-          : -1
-    )
-  const inPeriod = list.filter((r) => r.inPeriod)
-  return {
-    loans: list.length,
-    capitalLost: round2(list.reduce((s, r) => s + r.capitalLost, 0)),
-    collectedBefore: round2(list.reduce((s, r) => s + r.principalCollected + r.interestCollected, 0)),
-    periodLoans: inPeriod.length,
-    periodCapitalLost: round2(inPeriod.reduce((s, r) => s + r.capitalLost, 0)),
-    rows: list,
-  }
+  daysLate: number
+  overdueAmount: number
+  capitalAtRisk: number
 }
 
 export interface LateClient {
@@ -326,6 +270,8 @@ export interface LateClient {
   maxDaysLate: number
   overdueAmount: number
   capitalAtRisk: number
+  /** Sus préstamos atrasados, el más atrasado primero. */
+  lateLoans: LateLoan[]
 }
 
 /** Clientes con más atraso: primero más días, luego más monto vencido. */
@@ -339,12 +285,23 @@ export function lateClients(overdue: readonly OverdueLoan[], limit: number): Lat
       maxDaysLate: 0,
       overdueAmount: 0,
       capitalAtRisk: 0,
+      lateLoans: [],
     }
     current.loans += 1
     current.maxDaysLate = Math.max(current.maxDaysLate, o.days_late)
     current.overdueAmount = round2(current.overdueAmount + o.overdue_amount)
     current.capitalAtRisk = round2(current.capitalAtRisk + o.capital_at_risk)
+    current.lateLoans.push({
+      loanId: o.loan_id,
+      loanNumber: o.loan_number,
+      daysLate: o.days_late,
+      overdueAmount: o.overdue_amount,
+      capitalAtRisk: o.capital_at_risk,
+    })
     byClient.set(o.client_id, current)
+  }
+  for (const c of byClient.values()) {
+    c.lateLoans.sort((a, b) => b.daysLate - a.daysLate || a.loanNumber.localeCompare(b.loanNumber))
   }
   return [...byClient.values()]
     .sort((a, b) => b.maxDaysLate - a.maxDaysLate || b.overdueAmount - a.overdueAmount)

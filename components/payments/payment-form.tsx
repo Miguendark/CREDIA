@@ -35,7 +35,8 @@ import {
 import { ClientCombobox } from "@/components/shared/client-combobox"
 import { ReceiptDialog } from "@/components/payments/receipt-dialog"
 import { paymentSchema, type PaymentInput } from "@/lib/validations/payment"
-import { allocatePayment } from "@/lib/finance/payment-allocator"
+import { allocatePayment, centShortfall } from "@/lib/finance/payment-allocator"
+import { round2 } from "@/lib/finance/round"
 import { formatCurrency, formatDate } from "@/lib/utils/format"
 import { registerPaymentAction } from "@/app/(app)/pagos/actions"
 import {
@@ -147,11 +148,13 @@ export function PaymentForm({
         totalAmount: i.total_amount,
         remainingAmount: i.remaining_amount,
       }))
-    return allocatePayment(targets, amount)
+    const result = allocatePayment(targets, amount)
+    return { ...result, centShortfall: centShortfall(result, targets) }
   }, [selectedInstallment, installments, amount])
 
   const cascades = (allocationPreview?.allocations.length ?? 0) > 1
   const exceedsAvailable = (allocationPreview?.unallocatedAmount ?? 0) > 0
+  const shortfall = allocationPreview?.centShortfall ?? null
 
   async function submitPayment(values: PaymentInput) {
     setIsSubmitting(true)
@@ -409,6 +412,28 @@ export function PaymentForm({
                         <AlertDescription>
                           El monto cubre {allocationPreview.allocations.length} cuotas. Se pedirá confirmación antes
                           de registrar.
+                        </AlertDescription>
+                      </Alert>
+                    )}
+                    {shortfall !== null && (
+                      <Alert className="border-status-warning/50 bg-status-warning/10">
+                        <AlertTriangle className="size-4" />
+                        <AlertDescription className="space-y-2">
+                          <p>
+                            Faltaría {formatCurrency(shortfall)} para completar la cuota. El sistema la dará por pagada,
+                            pero el préstamo quedará con ese centavo de saldo.
+                          </p>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={isSubmitting}
+                            onClick={() =>
+                              form.setValue("amount", round2(amount + shortfall), { shouldValidate: true })
+                            }
+                          >
+                            Cobrar {formatCurrency(round2(amount + shortfall))} exacto
+                          </Button>
                         </AlertDescription>
                       </Alert>
                     )}

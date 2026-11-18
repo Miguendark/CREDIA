@@ -11,8 +11,8 @@ export default function FinanzasLoading() {
         </div>
         <Skeleton className="h-9 w-48" />
       </div>
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        {Array.from({ length: 6 }).map((_, i) => (
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        {Array.from({ length: 8 }).map((_, i) => (
           <Card key={i} className="gap-0 py-5">
             <CardContent className="space-y-3 px-5">
               <div className="flex justify-between">

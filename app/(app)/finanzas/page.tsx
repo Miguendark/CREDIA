@@ -1,6 +1,6 @@
 import type { Metadata } from "next"
 import { notFound } from "next/navigation"
-import { Banknote, HandCoins, Landmark, Percent, PiggyBank, TrendingUp } from "lucide-react"
+import { Banknote, HandCoins, Landmark, Percent, PiggyBank, Scale, TrendingUp, Wallet } from "lucide-react"
 import { createClient } from "@/lib/supabase/server"
 import { getCurrentStaffUser } from "@/services/users.service"
 import { getFinanceDashboard, MONTHS_IN_CHART, PROJECTION_WEEKS } from "@/services/finance.service"
@@ -14,12 +14,13 @@ import { PeriodFilter } from "@/components/finance/period-filter"
 import { CashflowChart, FrequencyChart, ProfitChart, ProjectionChart } from "@/components/finance/finance-charts"
 import { EfficiencyCard, LoanCountsCard, PortfolioRiskCard } from "@/components/finance/portfolio-health"
 import {
-  CancelledLoansTable,
   CollectorsTable,
   FrequencyTable,
   LateClientsTable,
+  LossesTable,
   TopClientsTable,
 } from "@/components/finance/finance-tables"
+import { ExpensesCard, MoraCard } from "@/components/finance/expenses-card"
 import { formatCount, formatCurrency, formatPct } from "@/components/finance/format"
 
 export const metadata: Metadata = { title: "Finanzas" }
@@ -76,6 +77,7 @@ export default async function FinanzasPage({
   const period = periodFromParams(await searchParams, today)
   const data = await getFinanceDashboard(supabase, period, today)
   const { kpis } = data
+  const isAdmin = staffUser.role === "admin"
   const prev = (value: number) => `${formatCurrency(value)} antes`
   const projectionTotal = data.projection.weeks.reduce((s, w) => s + w.total, 0)
   const projectionInterest = data.projection.weeks.reduce((s, w) => s + w.interest, 0)
@@ -96,7 +98,7 @@ export default async function FinanzasPage({
       </div>
 
       {/* KPIs */}
-      <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+      <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <KpiCard
           label="Ganancia cobrada"
           value={formatCurrency(kpis.interestCollected.current)}
@@ -106,6 +108,23 @@ export default async function FinanzasPage({
           polarity="higher_is_better"
           previousLabel={prev(kpis.interestCollected.previous)}
           help="Interés cobrado en el período: la parte de interés de cada pago registrado (por fecha de pago). Es la ganancia real que ya entró."
+        />
+        <KpiCard
+          label="Ganancia neta"
+          value={formatCurrency(kpis.netProfit.current)}
+          icon={Scale}
+          accent={kpis.netProfit.current < 0 ? "risk" : "profit"}
+          change={kpis.netProfit}
+          polarity="higher_is_better"
+          deltaFormat="amount"
+          previousLabel={prev(kpis.netProfit.previous)}
+          help={
+            <>
+              Ganancia cobrada − gastos − pérdida por incobrables, todo dentro del período. La pérdida cuenta en la
+              fecha en que el préstamo se marca incobrable. La mora todavía no se registra.
+            </>
+          }
+          footnote={`${formatCurrency(kpis.interestCollected.current)} − ${formatCurrency(data.expenses.total)} de gastos − ${formatCurrency(data.losses.periodLoss)} de incobrables.`}
         />
         <KpiCard
           label="Ganancia por cobrar"
@@ -125,20 +144,24 @@ export default async function FinanzasPage({
           change={kpis.capitalOutstanding}
           polarity="neutral"
           previousLabel={prev(kpis.capitalOutstanding.previous)}
-          help="Capital prestado que falta por recuperar, al cierre del período: capital de los préstamos vigentes menos el capital ya cobrado. No incluye cancelados."
+          help="Capital prestado que falta por recuperar, al cierre del período: capital de los préstamos vigentes menos el capital ya cobrado. No incluye cancelados ni préstamos marcados incobrables."
           footnote={
-            (data.futureDated.capital !== 0 || data.cancelled.capitalLost > 0) && (
+            (data.futureDated.capital !== 0 || data.losses.loss > 0 || data.losses.pending > 0) && (
               <>
                 {data.futureDated.capital !== 0 && (
                   <span className="block">
                     Incluye {formatCurrency(data.futureDated.capital)} de préstamos con fecha de inicio futura.
                   </span>
                 )}
-                {data.cancelled.capitalLost > 0 && (
+                {data.losses.loss > 0 && (
                   <span className="block text-status-critical">
-                    No incluye {formatCurrency(data.cancelled.capitalLost)} de capital no recuperado en{" "}
-                    {formatCount(data.cancelled.loans)}{" "}
-                    {data.cancelled.loans === 1 ? "préstamo cancelado" : "préstamos cancelados"}.
+                    No incluye {formatCurrency(data.losses.loss)} de incobrables.
+                  </span>
+                )}
+                {data.losses.pending > 0 && (
+                  <span className="block text-warning-foreground">
+                    No incluye {formatCurrency(data.losses.pending)} de {formatCount(data.losses.pendingLoans)}{" "}
+                    {data.losses.pendingLoans === 1 ? "cancelado" : "cancelados"} por clasificar.
                   </span>
                 )}
               </>
@@ -171,6 +194,18 @@ export default async function FinanzasPage({
               ? `Incluye ${formatCurrency(data.futureDated.cash)} de movimientos con fecha futura (igual que Capital).`
               : undefined
           }
+        />
+        <KpiCard
+          label="Caja después de gastos"
+          value={formatCurrency(kpis.cashAfterExpenses.current)}
+          icon={Wallet}
+          accent={kpis.cashAfterExpenses.current < 0 ? "risk" : "capital"}
+          change={kpis.cashAfterExpenses}
+          polarity="neutral"
+          deltaFormat="amount"
+          previousLabel={prev(kpis.cashAfterExpenses.previous)}
+          help="Disponible en caja menos todos los gastos registrados hasta el cierre del período. Los gastos no se registran en Capital, por eso Capital no los resta."
+          footnote={`Gastos registrados hasta el cierre: ${formatCurrency(data.expenses.totalUntilClose)}.`}
         />
         <KpiCard
           label="Rentabilidad mensual"
@@ -257,16 +292,27 @@ export default async function FinanzasPage({
         </div>
       </section>
 
+      {/* Gastos y pérdidas */}
+      <section className="space-y-4">
+        <SectionTitle description="Lo que se gastó y lo que no se va a recuperar. Ambos se restan de la ganancia neta.">
+          Gastos y pérdidas
+        </SectionTitle>
+        <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
+          <div className="space-y-4">
+            <ExpensesCard summary={data.expenses} previousTotal={data.expenses.previousTotal} isAdmin={isAdmin} />
+            <MoraCard />
+          </div>
+          <LossesTable summary={data.losses} isAdmin={isAdmin} today={today} />
+        </div>
+      </section>
+
       {/* Detalle */}
       <section className="space-y-4">
-        <SectionTitle description="Quién cobra, qué se perdió, quién genera más ganancia y quién está atrasado.">
-          Detalle
-        </SectionTitle>
+        <SectionTitle description="Quién cobra, quién genera más ganancia y quién está atrasado.">Detalle</SectionTitle>
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <CollectorsTable rows={data.byUser} />
-          <CancelledLoansTable summary={data.cancelled} />
+          <CollectorsTable rows={data.byUser} className="lg:col-span-2" />
           <TopClientsTable rows={data.topClients} />
-          <LateClientsTable rows={data.lateClients} />
+          <LateClientsTable rows={data.lateClients} isAdmin={isAdmin} today={today} />
           <FrequencyTable rows={data.byFrequency} />
         </div>
       </section>

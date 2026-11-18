@@ -25,6 +25,15 @@ export type LoanScheduleType = "interval" | "fixed_days"
 export type WhatsappConversationStatus = "pendiente" | "atendida" | "cerrada"
 export type WhatsappMessageSender = "cliente" | "agente" | "bot"
 export type ReceiptStatus = "activo" | "anulado"
+export type ExpenseCategory =
+  | "gasolina_transporte"
+  | "telefono_internet"
+  | "papeleria_impresion"
+  | "sueldos"
+  | "comisiones"
+  | "alquiler"
+  | "otros"
+export type WriteoffKind = "incobrable" | "error"
 
 export interface Database {
   public: {
@@ -326,6 +335,42 @@ export interface Database {
         Update: Record<string, never>
         Relationships: []
       }
+      expenses: {
+        Row: {
+          id: string
+          expense_date: string
+          category: ExpenseCategory
+          amount: number
+          description: string | null
+          created_by: string | null
+          created_at: string
+          voided_at: string | null
+          voided_by: string | null
+          void_reason: string | null
+        }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+      loan_writeoffs: {
+        Row: {
+          id: string
+          loan_id: string
+          kind: WriteoffKind
+          writeoff_date: string
+          reason: string
+          capital_lost: number
+          interest_lost: number
+          created_by: string | null
+          created_at: string
+          voided_at: string | null
+          voided_by: string | null
+          void_reason: string | null
+        }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
     }
     Views: {
       client_summary: {
@@ -519,6 +564,63 @@ export interface Database {
           p_reason: string
         }
         Returns: Database["public"]["Tables"]["receipts"]["Row"]
+      }
+      register_expense: {
+        Args: {
+          p_category: ExpenseCategory
+          p_amount: number
+          p_description: string | null
+          p_expense_date: string
+        }
+        Returns: Database["public"]["Tables"]["expenses"]["Row"]
+      }
+      void_expense: {
+        Args: { p_expense_id: string; p_reason: string }
+        Returns: Database["public"]["Tables"]["expenses"]["Row"]
+      }
+      classify_loan: {
+        Args: { p_loan_id: string; p_kind: WriteoffKind; p_reason: string; p_writeoff_date: string }
+        Returns: Database["public"]["Tables"]["loan_writeoffs"]["Row"]
+      }
+      void_writeoff: {
+        Args: { p_writeoff_id: string; p_reason: string }
+        Returns: Database["public"]["Tables"]["loan_writeoffs"]["Row"]
+      }
+      finance_expenses: {
+        Args: { p_from: string; p_to: string }
+        Returns: {
+          id: string
+          expense_date: string
+          category: ExpenseCategory
+          amount: number
+          description: string | null
+          created_by_name: string
+          created_at: string
+          voided_at: string | null
+          voided_by_name: string | null
+          void_reason: string | null
+        }[]
+      }
+      finance_expenses_total: {
+        Args: { p_date: string }
+        Returns: number
+      }
+      finance_writeoffs: {
+        Args: Record<string, never>
+        Returns: {
+          id: string
+          loan_id: string
+          loan_number: string
+          client_id: string
+          client_name: string
+          loan_status: LoanStatus
+          kind: WriteoffKind
+          writeoff_date: string
+          reason: string
+          capital_lost: number
+          interest_lost: number
+          created_by_name: string
+        }[]
       }
     }
   }

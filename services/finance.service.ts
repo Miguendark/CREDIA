@@ -2,7 +2,6 @@ import type { TypedSupabaseClient } from "@/lib/supabase/types"
 import { daysInclusive, type Period } from "@/lib/finance/periods"
 import {
   agingSummary,
-  cancelledSummary,
   collectionEfficiency,
   compare,
   frequencyBreakdown,
@@ -12,7 +11,7 @@ import {
   sumFlows,
   sumPosition,
   type AgingSummary,
-  type CancelledSummary,
+  type CancelledLoanRow,
   type Change,
   type FlowRow,
   type FrequencyBreakdown,
@@ -22,10 +21,22 @@ import {
   type ProjectionPoint,
 } from "@/lib/finance/indicators"
 import { round2 } from "@/lib/finance/round"
+import {
+  expenseSummary,
+  lossSummary,
+  netProfit,
+  writeoffLossBetween,
+  type ExpenseRow,
+  type ExpenseSummary,
+  type LossSummary,
+  type WriteoffRow,
+} from "@/lib/finance/losses"
+import type { ExpenseCategory, WriteoffKind } from "@/types/database.types"
+import type { ClassifyLoanInput, ExpenseInput, VoidInput } from "@/lib/validations/finance"
 
 /**
  * Panel de Finanzas. Las sumas las hacen las funciones finance_* en la base
- * (migración 0013, solo lectura, solo admin/supervisor); aquí solo se
+ * (migraciones 0013 y 0014, solo admin/supervisor); aquí solo se
  * piden en paralelo y se combinan con lib/finance/indicators.
  *
  * Cierre "hoy": si el período termina hoy, la cartera y la caja incluyen
@@ -44,6 +55,10 @@ export interface FinanceKpis {
   capitalOutstanding: Change
   principalCollected: Change
   cash: Change
+  /** Ganancia cobrada − gastos − pérdida por incobrables (del período). */
+  netProfit: Change
+  /** Caja − gastos registrados hasta el cierre. */
+  cashAfterExpenses: Change
   /** % mensual; null si no hubo capital en la calle. */
   monthlyReturn: {
     current: number | null
@@ -97,7 +112,10 @@ export interface FinanceDashboard {
     loans: number
   }[]
   lateClients: LateClient[]
-  cancelled: CancelledSummary
+  /** Gastos del período (y el total hasta el cierre). */
+  expenses: ExpenseSummary & { previousTotal: number; totalUntilClose: number }
+  /** Cancelados e incobrables. */
+  losses: LossSummary
 }
 
 async function call<T>(promise: PromiseLike<{ data: T | null; error: { message: string } | null }>): Promise<T> {
@@ -137,6 +155,27 @@ const toOverdue = (rows: OverdueLoan[]): OverdueLoan[] =>
     overdue_installments: n(r.overdue_installments),
   }))
 
+const toExpenses = (rows: ExpenseRow[]): ExpenseRow[] =>
+  rows.map((r) => ({ ...r, category: r.category as ExpenseCategory, amount: n(r.amount) }))
+
+const toWriteoffs = (rows: WriteoffRow[]): WriteoffRow[] =>
+  rows.map((r) => ({
+    ...r,
+    kind: r.kind as WriteoffKind,
+    capital_lost: n(r.capital_lost),
+    interest_lost: n(r.interest_lost),
+  }))
+
+const toCancelled = (rows: CancelledLoanRow[]): CancelledLoanRow[] =>
+  rows.map((c) => ({
+    ...c,
+    principal_amount: n(c.principal_amount),
+    principal_collected: n(c.principal_collected),
+    interest_collected: n(c.interest_collected),
+    payments: n(c.payments),
+    capital_lost: n(c.capital_lost),
+  }))
+
 export async function getFinanceDashboard(
   supabase: TypedSupabaseClient,
   period: Period,
@@ -165,6 +204,11 @@ export async function getFinanceDashboard(
     byUser,
     topClients,
     cancelled,
+    expenses,
+    expensesPrev,
+    expensesTotal,
+    expensesTotalPrev,
+    writeoffs,
   ] = await Promise.all([
     call(supabase.rpc("finance_position", { p_date: stockDate })),
     call(supabase.rpc("finance_position", { p_date: period.to })),
@@ -214,6 +258,11 @@ export async function getFinanceDashboard(
       })
     ),
     call(supabase.rpc("finance_cancelled_loans")),
+    call(supabase.rpc("finance_expenses", { p_from: period.from, p_to: period.to })),
+    call(supabase.rpc("finance_expenses", { p_from: period.prevFrom, p_to: period.prevTo })),
+    call(supabase.rpc("finance_expenses_total", { p_date: stockDate })),
+    call(supabase.rpc("finance_expenses_total", { p_date: period.prevTo })),
+    call(supabase.rpc("finance_writeoffs")),
   ])
 
   const pos = sumPosition(toPosition(position))
@@ -240,6 +289,17 @@ export async function getFinanceDashboard(
   const cashNow = n(cash)
   const cashPrevValue = n(cashPrev)
 
+  const expenseRows = toExpenses(expenses)
+  const exp = expenseSummary(expenseRows)
+  const expPrev = expenseSummary(toExpenses(expensesPrev))
+  const writeoffRows = toWriteoffs(writeoffs)
+  const losses = lossSummary(toCancelled(cancelled), writeoffRows, period.from, period.to)
+  const lossPrev = writeoffLossBetween(writeoffRows, period.prevFrom, period.prevTo)
+  const netNow = netProfit(fl.interestCollected, exp.total, losses.periodLoss)
+  const netPrev = netProfit(flPrev.interestCollected, expPrev.total, lossPrev)
+  const afterExpensesNow = round2(cashNow - n(expensesTotal))
+  const afterExpensesPrev = round2(cashPrevValue - n(expensesTotalPrev))
+
   return {
     kpis: {
       interestCollected: compare(fl.interestCollected, flPrev.interestCollected),
@@ -247,6 +307,8 @@ export async function getFinanceDashboard(
       capitalOutstanding: compare(pos.capitalOutstanding, posPrev.capitalOutstanding),
       principalCollected: compare(fl.principalCollected, flPrev.principalCollected),
       cash: compare(cashNow, cashPrevValue),
+      netProfit: compare(netNow, netPrev),
+      cashAfterExpenses: compare(afterExpensesNow, afterExpensesPrev),
       monthlyReturn: {
         current: returnNow,
         previous: returnPrev,
@@ -320,17 +382,43 @@ export async function getFinanceDashboard(
       loans: n(c.loans),
     })),
     lateClients: lateClients(overdueRows, TOP_LIMIT),
-    cancelled: cancelledSummary(
-      cancelled.map((c) => ({
-        ...c,
-        principal_amount: n(c.principal_amount),
-        principal_collected: n(c.principal_collected),
-        interest_collected: n(c.interest_collected),
-        payments: n(c.payments),
-        capital_lost: n(c.capital_lost),
-      })),
-      period.from,
-      period.to
-    ),
+    expenses: { ...exp, previousTotal: expPrev.total, totalUntilClose: round2(n(expensesTotal)) },
+    losses,
   }
+}
+
+// ---------------------------------------------------------------------------
+// Escritura (fase 2). Los permisos los verifica la base en cada función:
+// gastos → admin o supervisor; anular gasto, clasificar y quitar
+// clasificación → solo admin.
+// ---------------------------------------------------------------------------
+
+export async function registerExpense(supabase: TypedSupabaseClient, input: ExpenseInput) {
+  return call(
+    supabase.rpc("register_expense", {
+      p_category: input.category,
+      p_amount: input.amount,
+      p_description: input.description || null,
+      p_expense_date: input.expense_date,
+    })
+  )
+}
+
+export async function voidExpense(supabase: TypedSupabaseClient, input: VoidInput) {
+  return call(supabase.rpc("void_expense", { p_expense_id: input.id, p_reason: input.reason }))
+}
+
+export async function classifyLoan(supabase: TypedSupabaseClient, input: ClassifyLoanInput) {
+  return call(
+    supabase.rpc("classify_loan", {
+      p_loan_id: input.loan_id,
+      p_kind: input.kind,
+      p_reason: input.reason,
+      p_writeoff_date: input.writeoff_date,
+    })
+  )
+}
+
+export async function voidWriteoff(supabase: TypedSupabaseClient, input: VoidInput) {
+  return call(supabase.rpc("void_writeoff", { p_writeoff_id: input.id, p_reason: input.reason }))
 }

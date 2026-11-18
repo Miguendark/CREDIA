@@ -4,7 +4,6 @@ import { daysInclusive, formatMonthLabel, formatRange, monthsInDays, periodFromP
 import {
   agingBucketFor,
   agingSummary,
-  cancelledSummary,
   changeTone,
   collectionEfficiency,
   compare,
@@ -20,6 +19,16 @@ import {
   type OverdueLoan,
   type PositionRow,
 } from "./indicators"
+import {
+  EXPENSE_CATEGORY_LABELS,
+  expenseSummary,
+  lossSummary,
+  netProfit,
+  writeoffLossBetween,
+  type ExpenseRow,
+  type WriteoffRow,
+} from "./losses"
+import type { ExpenseCategory, LoanStatus } from "@/types/database.types"
 
 const pick = (p: ReturnType<typeof resolvePeriod>) => [p.from, p.to, p.prevFrom, p.prevTo]
 
@@ -288,45 +297,6 @@ describe("cartera en riesgo", () => {
     assert.equal(s.pct, null)
     assert.equal(s.currentLoans, 0)
   })
-  test("cancelados: pérdida acumulada hasta el cierre y la del período", () => {
-    const row = (n: string, on: string, principal: number, collected: number): CancelledLoanRow => ({
-      loan_id: n,
-      loan_number: n,
-      client_id: "c",
-      client_name: "Cliente",
-      cancelled_on: on,
-      principal_amount: principal,
-      principal_collected: collected,
-      interest_collected: 100,
-      payments: collected > 0 ? 1 : 0,
-      capital_lost: principal - collected,
-      notes: null,
-    })
-    const s = cancelledSummary(
-      [
-        row("PR-1", "2026-09-10", 5000, 0),
-        row("PR-2", "2026-11-03T04:00:00.000Z", 10000, 2500),
-        row("PR-3", "2026-11-03", 3000, 0),
-        row("PR-4", "2026-12-01", 8000, 0), // después del cierre: no cuenta
-      ],
-      "2026-11-01",
-      "2026-11-30"
-    )
-    assert.equal(s.loans, 3)
-    assert.equal(s.capitalLost, 15500)
-    assert.equal(s.collectedBefore, 2800)
-    assert.equal(s.periodLoans, 2)
-    assert.equal(s.periodCapitalLost, 10500)
-    // más recientes primero; misma fecha por número
-    assert.deepEqual(
-      s.rows.map((r) => [r.loanNumber, r.cancelledOn, r.inPeriod]),
-      [
-        ["PR-2", "2026-11-03", true],
-        ["PR-3", "2026-11-03", true],
-        ["PR-1", "2026-09-10", false],
-      ]
-    )
-  })
   test("clientes con más atraso: días, luego monto", () => {
     const list = lateClients(
       [loan(10, 100, 50, "a"), loan(40, 100, 10, "b"), loan(10, 100, 90, "c"), loan(2, 100, 5, "a")],
@@ -341,6 +311,15 @@ describe("cartera en riesgo", () => {
       ]
     )
     assert.equal(lateClients([loan(1, 1, 1, "a"), loan(2, 1, 1, "b")], 1).length, 1)
+    // cada cliente trae sus préstamos atrasados, el más atrasado primero (para "Marcar incobrable")
+    const a = list.find((c) => c.clientId === "a")!
+    assert.deepEqual(
+      a.lateLoans.map((l) => [l.loanId, l.daysLate]),
+      [
+        ["l10a", 10],
+        ["l2a", 2],
+      ]
+    )
   })
 })
 
@@ -416,5 +395,140 @@ describe("por frecuencia", () => {
     assert.equal(rows[0].share, 75)
     assert.ok(Math.abs(rows[0].monthlyReturn! - 5) < 1e-9)
     assert.equal(rows[1].monthlyReturn, null)
+  })
+})
+
+describe("gastos, pérdidas y ganancia neta", () => {
+  const cancelled = (n: string, on: string, principal: number, collected: number): CancelledLoanRow => ({
+    loan_id: n,
+    loan_number: n,
+    client_id: "c",
+    client_name: "Cliente",
+    cancelled_on: on,
+    principal_amount: principal,
+    principal_collected: collected,
+    interest_collected: 100,
+    payments: collected > 0 ? 1 : 0,
+    capital_lost: principal - collected,
+    notes: "no paga",
+  })
+  const writeoff = (
+    loan: string,
+    kind: "incobrable" | "error",
+    date: string,
+    lost: number,
+    status: LoanStatus = "cancelado"
+  ): WriteoffRow => ({
+    id: `w-${loan}`,
+    loan_id: loan,
+    loan_number: loan,
+    client_id: "c",
+    client_name: "Cliente",
+    loan_status: status,
+    kind,
+    writeoff_date: date,
+    reason: "motivo",
+    capital_lost: lost,
+    interest_lost: 0,
+    created_by_name: "Admin",
+  })
+
+  test("cancelados: por clasificar, incobrable y error; activo incobrable aparte", () => {
+    const s = lossSummary(
+      [
+        cancelled("PR-09", "2026-09-10", 5000, 0), // incobrable marcado en noviembre
+        cancelled("PR-11", "2026-11-03T04:00:00.000Z", 10000, 2500), // por clasificar
+        cancelled("PR-18", "2026-11-05", 3000, 0), // error: no es pérdida
+        cancelled("PR-30", "2026-12-01", 8000, 0), // después del cierre: no aparece
+      ],
+      [
+        writeoff("PR-09", "incobrable", "2026-11-10", 5000),
+        writeoff("PR-18", "error", "2026-11-06", 3000),
+        writeoff("PR-20", "incobrable", "2026-10-15", 4000, "activo"), // activo, marcado antes del período
+        writeoff("PR-21", "incobrable", "2026-12-02", 999, "activo"), // marcado después del cierre: no cuenta
+      ],
+      "2026-11-01",
+      "2026-11-30"
+    )
+    assert.equal(s.loss, 9000) // PR-09 + PR-20
+    assert.equal(s.lossLoans, 2)
+    assert.equal(s.periodLoss, 5000) // solo PR-09 se marcó en el período
+    assert.equal(s.periodLossLoans, 1)
+    assert.equal(s.pending, 7500) // PR-11
+    assert.equal(s.pendingLoans, 1)
+    assert.equal(s.errors, 3000)
+    assert.equal(s.errorLoans, 1)
+    // orden: por clasificar, incobrables (recientes primero), errores
+    assert.deepEqual(
+      s.rows.map((r) => [r.loanNumber, r.status, r.inPeriod]),
+      [
+        ["PR-11", "por_clasificar", true],
+        ["PR-09", "incobrable", true],
+        ["PR-20", "incobrable", false],
+        ["PR-18", "error", true],
+      ]
+    )
+    const pr09 = s.rows.find((r) => r.loanNumber === "PR-09")!
+    assert.equal(pr09.cancelledOn, "2026-09-10")
+    assert.equal(pr09.writeoff?.date, "2026-11-10")
+    assert.equal(s.rows.find((r) => r.loanNumber === "PR-11")!.collectedBefore, 2600)
+  })
+
+  test("una clasificación posterior al cierre se ve por clasificar", () => {
+    const s = lossSummary(
+      [cancelled("PR-09", "2026-09-10", 5000, 0)],
+      [writeoff("PR-09", "incobrable", "2026-12-01", 5000)],
+      "2026-11-01",
+      "2026-11-30"
+    )
+    assert.equal(s.loss, 0)
+    assert.equal(s.pending, 5000)
+  })
+
+  test("pérdida entre fechas: solo incobrables, por fecha de clasificación", () => {
+    const w = [
+      writeoff("A", "incobrable", "2026-10-05", 1000),
+      writeoff("B", "error", "2026-10-06", 2000),
+      writeoff("C", "incobrable", "2026-11-01", 500),
+    ]
+    assert.equal(writeoffLossBetween(w, "2026-10-01", "2026-10-31"), 1000)
+    assert.equal(writeoffLossBetween(w, "2026-10-01", "2026-11-01"), 1500)
+  })
+
+  test("gastos: sin anulados, por categoría de mayor a menor", () => {
+    const e = (id: string, category: ExpenseCategory, amount: number, date: string, voided = false): ExpenseRow => ({
+      id,
+      expense_date: date,
+      category,
+      amount,
+      description: null,
+      created_by_name: "Admin",
+      voided_at: voided ? "2026-11-10T12:00:00Z" : null,
+      voided_by_name: voided ? "Admin" : null,
+      void_reason: voided ? "duplicado" : null,
+    })
+    const s = expenseSummary([
+      e("1", "gasolina_transporte", 500, "2026-11-02"),
+      e("2", "sueldos", 3000, "2026-11-05"),
+      e("3", "gasolina_transporte", 250.5, "2026-11-09"),
+      e("4", "sueldos", 9999, "2026-11-09", true), // anulado
+    ])
+    assert.equal(s.total, 3750.5)
+    assert.equal(s.count, 3)
+    assert.deepEqual(
+      s.byCategory.map((c) => [c.category, c.amount, c.count]),
+      [
+        ["sueldos", 3000, 1],
+        ["gasolina_transporte", 750.5, 2],
+      ]
+    )
+    assert.equal(s.rows.length, 4) // los anulados se listan (tachados)
+    assert.equal(s.rows[0].expense_date, "2026-11-09")
+    assert.equal(EXPENSE_CATEGORY_LABELS.telefono_internet, "Teléfono e internet")
+  })
+
+  test("ganancia neta = ganancia cobrada − gastos − pérdida", () => {
+    assert.equal(netProfit(10_000, 3_750.5, 5_000), 1_249.5)
+    assert.equal(netProfit(1_000, 2_000, 0), -1_000)
   })
 })

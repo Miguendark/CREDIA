@@ -1,20 +1,25 @@
 import Link from "next/link"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { FREQUENCY_LABELS } from "@/lib/finance/frequency"
-import type { CancelledSummary, FrequencyBreakdown, LateClient } from "@/lib/finance/indicators"
+import type { FrequencyBreakdown, LateClient } from "@/lib/finance/indicators"
+import type { LossSummary } from "@/lib/finance/losses"
+import { ClassifyLoanDialog } from "./classify-loan-dialog"
+import { ReasonDialog } from "./reason-dialog"
 import { formatShortDate } from "@/lib/finance/periods"
 import { cn } from "@/lib/utils"
 import { formatCount, formatCurrency, formatPct } from "./format"
 import { FREQUENCY_COLORS } from "./frequency-colors"
 import { InfoHint } from "./info-hint"
 
-function TableCard({
+export function TableCard({
   title,
   help,
   empty,
   isEmpty,
   children,
   className,
+  action,
+  summary,
 }: {
   title: string
   help: React.ReactNode
@@ -22,16 +27,22 @@ function TableCard({
   isEmpty: boolean
   children: React.ReactNode
   className?: string
+  /** Botón a la derecha del título. */
+  action?: React.ReactNode
+  /** Resumen que se muestra aunque la tabla esté vacía. */
+  summary?: React.ReactNode
 }) {
   return (
     <Card className={className}>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between gap-3">
         <CardTitle className="flex items-center gap-1.5 text-base">
           {title}
           <InfoHint title={title}>{help}</InfoHint>
         </CardTitle>
+        {action}
       </CardHeader>
       <CardContent>
+        {summary}
         {isEmpty ? (
           <div className="flex h-28 items-center justify-center rounded-lg border border-dashed border-border text-sm text-muted-foreground">
             {empty}
@@ -44,11 +55,12 @@ function TableCard({
   )
 }
 
-const TH = "pb-2 text-xs font-medium text-muted-foreground"
-const TD = "py-2.5 tabular-nums"
+export const TH = "pb-2 text-xs font-medium text-muted-foreground"
+export const TD = "py-2.5 tabular-nums"
 
 export function CollectorsTable({
   rows,
+  className,
 }: {
   rows: {
     userId: string | null
@@ -58,9 +70,11 @@ export function CollectorsTable({
     interest: number
     share: number | null
   }[]
+  className?: string
 }) {
   return (
     <TableCard
+      className={className}
       title="Cobrado por usuario"
       help={
         <>
@@ -159,7 +173,7 @@ function daysTone(days: number) {
   return "bg-status-warning/15 text-warning-foreground"
 }
 
-export function LateClientsTable({ rows }: { rows: LateClient[] }) {
+export function LateClientsTable({ rows, isAdmin, today }: { rows: LateClient[]; isAdmin: boolean; today: string }) {
   return (
     <TableCard
       title="Clientes con más atraso"
@@ -174,6 +188,7 @@ export function LateClientsTable({ rows }: { rows: LateClient[] }) {
             <th className={cn(TH, "text-right")}>Atraso</th>
             <th className={cn(TH, "text-right")}>Vencido</th>
             <th className={cn(TH, "text-right")}>Saldo capital</th>
+            {isAdmin && <th className={cn(TH, "w-px")} aria-label="Acciones" />}
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
@@ -194,6 +209,22 @@ export function LateClientsTable({ rows }: { rows: LateClient[] }) {
                 {formatCurrency(r.overdueAmount)}
               </td>
               <td className={cn(TD, "text-right")}>{formatCurrency(r.capitalAtRisk)}</td>
+              {isAdmin && (
+                <td className={cn(TD, "pl-3 text-right")}>
+                  <ClassifyLoanDialog
+                    mode="active"
+                    clientName={r.clientName}
+                    today={today}
+                    loans={r.lateLoans.map((l) => ({
+                      loanId: l.loanId,
+                      loanNumber: l.loanNumber,
+                      detail:
+                        formatCount(l.daysLate) + " días de atraso · saldo capital " + formatCurrency(l.capitalAtRisk),
+                      defaultDate: today,
+                    }))}
+                  />
+                </td>
+              )}
             </tr>
           ))}
         </tbody>
@@ -255,74 +286,163 @@ export function FrequencyTable({ rows }: { rows: FrequencyBreakdown[] }) {
   )
 }
 
+const LOSS_BADGE = {
+  por_clasificar: { label: "Por clasificar", className: "bg-status-warning/15 text-warning-foreground" },
+  incobrable: { label: "Incobrable", className: "bg-status-critical/10 text-status-critical" },
+  error: { label: "Error", className: "bg-muted text-muted-foreground" },
+} as const
+
 /**
- * Préstamos cancelados: capital que salió y no volvió. Mientras no exista
- * "incobrable" (fase 2), es la forma de ver esa pérdida en Finanzas.
+ * Cancelados e incobrables. Pérdida = capital no recuperado de los
+ * marcados incobrables, en la fecha en que se marcan. Los marcados "error"
+ * no son pérdida. Los cancelados sin clasificar quedan "por clasificar".
  */
-export function CancelledLoansTable({ summary }: { summary: CancelledSummary }) {
+export function LossesTable({ summary, isAdmin, today }: { summary: LossSummary; isAdmin: boolean; today: string }) {
   const { rows } = summary
   return (
     <TableCard
-      title="Préstamos cancelados"
+      title="Cancelados e incobrables"
       help={
         <>
-          Préstamos marcados «Cancelado» hasta el cierre del período. <b>No recuperado</b> = capital prestado − capital
-          cobrado antes de cancelar. No se resta de la ganancia ni de la caja (la caja ya refleja el desembolso); solo
-          muestra cuánto capital se perdió. Si un préstamo se canceló por error al crearlo, no es una pérdida real.
+          <b>Incobrable</b>: el cliente no va a pagar; su capital no recuperado es pérdida en la fecha en que se marca y
+          se resta de la ganancia neta. <b>Error</b>: préstamo creado por error; no es pérdida. <b>Por clasificar</b>:
+          cancelados que todavía no se han clasificado (no se restan). Marcar un préstamo no lo cambia: Dashboard,
+          Capital y Cobros lo siguen mostrando igual.
         </>
       }
-      empty="No hay préstamos cancelados."
+      empty="No hay préstamos cancelados ni incobrables."
       isEmpty={rows.length === 0}
+      summary={
+        rows.length > 0 && (
+          <dl className="mb-4 grid grid-cols-3 gap-3 text-sm">
+            <div>
+              <dt className="text-xs text-muted-foreground">Pérdida reconocida</dt>
+              <dd className="text-lg font-semibold tabular-nums text-status-critical">
+                {formatCurrency(summary.loss)}
+              </dd>
+              <dd className="text-xs text-muted-foreground">
+                {formatCount(summary.lossLoans)} {summary.lossLoans === 1 ? "préstamo" : "préstamos"}
+                {summary.periodLossLoans > 0 && <> · {formatCurrency(summary.periodLoss)} en el período</>}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Por clasificar</dt>
+              <dd className="text-lg font-semibold tabular-nums">{formatCurrency(summary.pending)}</dd>
+              <dd className="text-xs text-muted-foreground">
+                {formatCount(summary.pendingLoans)} {summary.pendingLoans === 1 ? "cancelado" : "cancelados"}
+              </dd>
+            </div>
+            <div>
+              <dt className="text-xs text-muted-foreground">Errores (no es pérdida)</dt>
+              <dd className="text-lg font-semibold tabular-nums text-muted-foreground">
+                {formatCurrency(summary.errors)}
+              </dd>
+              <dd className="text-xs text-muted-foreground">
+                {formatCount(summary.errorLoans)} {summary.errorLoans === 1 ? "préstamo" : "préstamos"}
+              </dd>
+            </div>
+          </dl>
+        )
+      }
     >
-      <div className="mb-3 flex flex-wrap items-end gap-x-4 gap-y-1">
-        <p className="text-2xl font-semibold tracking-tight tabular-nums text-status-critical">
-          {formatCurrency(summary.capitalLost)}
-        </p>
-        <p className="pb-0.5 text-sm text-muted-foreground">
-          de capital no recuperado en {formatCount(summary.loans)} {summary.loans === 1 ? "préstamo" : "préstamos"}
-          {summary.periodLoans > 0 && (
-            <>
-              {" "}
-              · {formatCount(summary.periodLoans)} en este período ({formatCurrency(summary.periodCapitalLost)})
-            </>
-          )}
-        </p>
-      </div>
-      <table className="w-full min-w-[440px] text-sm">
+      <table className="w-full min-w-[520px] text-sm">
         <thead>
           <tr className="text-left">
             <th className={TH}>Préstamo</th>
-            <th className={TH}>Cancelado</th>
-            <th className={cn(TH, "text-right")}>Prestado</th>
-            <th className={cn(TH, "text-right")}>Cobrado</th>
+            <th className={TH}>Estado</th>
+            <th className={TH}>Fecha</th>
             <th className={cn(TH, "text-right")}>No recuperado</th>
+            {isAdmin && <th className={cn(TH, "w-px")} aria-label="Acciones" />}
           </tr>
         </thead>
         <tbody className="divide-y divide-border">
-          {rows.map((r) => (
-            <tr key={r.loanId}>
-              <td className={TD}>
-                <Link href={`/prestamos/${r.loanId}`} className="font-medium hover:underline">
-                  {r.loanNumber}
-                </Link>
-                <span
-                  className="block max-w-[14rem] truncate text-xs text-muted-foreground"
-                  title={r.notes ?? undefined}
+          {rows.map((r) => {
+            const badge = LOSS_BADGE[r.status]
+            const note = r.writeoff?.reason ?? r.notes
+            const date = r.writeoff?.date ?? r.cancelledOn
+            const loanState =
+              r.loanStatus === "cancelado"
+                ? "Cancelado"
+                : r.loanStatus === "pagado"
+                  ? "Se pagó después"
+                  : "Sigue activo"
+            return (
+              <tr key={r.loanId}>
+                <td className={TD}>
+                  <Link href={`/prestamos/${r.loanId}`} className="font-medium hover:underline">
+                    {r.loanNumber}
+                  </Link>
+                  <span
+                    className="block max-w-[15rem] truncate text-xs text-muted-foreground"
+                    title={note ?? undefined}
+                  >
+                    {r.clientName}
+                    {note ? ` · ${note}` : ""}
+                  </span>
+                </td>
+                <td className={TD}>
+                  <span
+                    className={cn("rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap", badge.className)}
+                  >
+                    {badge.label}
+                  </span>
+                  <span className="mt-1 block text-xs text-muted-foreground">{loanState}</span>
+                </td>
+                <td className={cn(TD, "whitespace-nowrap", r.inPeriod ? "font-medium" : "text-muted-foreground")}>
+                  {date ? formatShortDate(date) : "—"}
+                  {r.writeoff && r.cancelledOn && r.cancelledOn !== r.writeoff.date && (
+                    <span className="block text-xs font-normal text-muted-foreground">
+                      cancelado {formatShortDate(r.cancelledOn)}
+                    </span>
+                  )}
+                </td>
+                <td
+                  className={cn(
+                    TD,
+                    "text-right font-medium",
+                    r.status === "incobrable" && "text-status-critical",
+                    r.status === "error" && "text-muted-foreground line-through"
+                  )}
                 >
-                  {r.clientName}
-                  {r.notes ? ` · ${r.notes}` : ""}
-                </span>
-              </td>
-              <td className={cn(TD, "whitespace-nowrap", r.inPeriod ? "font-medium" : "text-muted-foreground")}>
-                {formatShortDate(r.cancelledOn)}
-              </td>
-              <td className={cn(TD, "text-right")}>{formatCurrency(r.principal)}</td>
-              <td className={cn(TD, "text-right text-muted-foreground")}>
-                {r.payments > 0 ? formatCurrency(r.principalCollected + r.interestCollected) : "—"}
-              </td>
-              <td className={cn(TD, "text-right font-medium text-status-critical")}>{formatCurrency(r.capitalLost)}</td>
-            </tr>
-          ))}
+                  {formatCurrency(r.capitalLost)}
+                </td>
+                {isAdmin && (
+                  <td className={cn(TD, "pl-3 text-right")}>
+                    {r.writeoff ? (
+                      <ReasonDialog
+                        kind="writeoff"
+                        id={r.writeoff.id}
+                        description={`${r.loanNumber} (${r.clientName}) volverá a quedar ${
+                          r.loanStatus === "cancelado" ? "por clasificar" : "en la cartera de Finanzas"
+                        }. Lo clasificó ${r.writeoff.by}: «${r.writeoff.reason}».`}
+                      />
+                    ) : (
+                      <ClassifyLoanDialog
+                        mode="cancelled"
+                        clientName={r.clientName}
+                        today={today}
+                        loans={[
+                          {
+                            loanId: r.loanId,
+                            loanNumber: r.loanNumber,
+                            detail: [
+                              r.principal !== null ? `Prestado ${formatCurrency(r.principal)}` : null,
+                              r.collectedBefore !== null ? `cobrado ${formatCurrency(r.collectedBefore)}` : null,
+                              `no recuperado ${formatCurrency(r.capitalLost)}`,
+                              r.cancelledOn ? `cancelado el ${formatShortDate(r.cancelledOn)}` : null,
+                            ]
+                              .filter(Boolean)
+                              .join(" · "),
+                            defaultDate: r.cancelledOn && r.cancelledOn <= today ? r.cancelledOn : today,
+                          },
+                        ]}
+                      />
+                    )}
+                  </td>
+                )}
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </TableCard>
