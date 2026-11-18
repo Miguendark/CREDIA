@@ -1,5 +1,5 @@
 /**
- * Pruebas de integración de Finanzas (migración 0013) contra nexa-pruebas.
+ * Pruebas de integración de Finanzas (migraciones 0013 y 0014) contra nexa-pruebas.
  *
  *   npx tsx database/tests/finance.integration.mts
  *
@@ -8,6 +8,8 @@
  *   2020, un año sin otros datos, y verifica cifras calculadas a mano.
  * - Cuadres globales: compara las funciones con cálculos independientes hechos
  *   aquí a partir de las filas crudas (service role).
+ * - Fase 2: gastos, clasificación de préstamos y permisos. Los datos QA de
+ *   corridas anteriores se ANULAN (no se borran) al empezar.
  * - Nunca hace DELETE ni TRUNCATE.
  */
 import { config } from "dotenv"
@@ -245,6 +247,156 @@ type Flow = { frequency: string; interest_collected: number; principal_collected
   check("cobrador y anon no pueden ver los cancelados", !!rc.error && !!ra.error)
 }
 
+// ===== Fase 2: gastos e incobrables (migración 0014) =====
+console.log("\nE. Gastos e incobrables (fase 2)")
+const today0 = todayRD()
+const loanA = scenario.find((l) => l.frequency === "monthly")!.id // cancelado hoy
+const loanB = scenario.find((l) => l.frequency === "weekly")!.id // cancelado el 2020-04-01
+// Préstamo activo QA (2021, sin pagos) para "Marcar incobrable".
+const ACTIVE_NOTE = "QA FIN ACTIVO"
+let activeLoan = must(await service.from("loans").select("id, status, start_date").eq("notes", ACTIVE_NOTE).maybeSingle(), "activo QA")
+if (!activeLoan) {
+  console.log("     Creando préstamo activo QA (solo la primera vez)…")
+  const calc = calculateLoan({ principal: 2_000, interestRate: 10, interestType: "fixed_capital", numberOfInstallments: 2, frequency: "monthly", firstPaymentDate: "2021-06-01" })
+  must(await admin.rpc("create_loan_with_installments", {
+    p_client_id: clientId, p_principal_amount: 2_000, p_interest_rate: 10, p_interest_type: "fixed_capital",
+    p_number_of_installments: 2, p_installment_amount: calc.installmentAmount, p_total_interest: calc.totalInterest,
+    p_total_amount: calc.totalAmount, p_frequency: "monthly", p_start_date: "2021-05-01", p_first_payment_date: "2021-06-01", p_notes: ACTIVE_NOTE,
+    p_installments: calc.installments.map((i) => ({ installment_number: i.installmentNumber, due_date: i.dueDate, principal_amount: i.principalAmount, interest_amount: i.interestAmount, total_amount: i.totalAmount })),
+  }), "crear activo QA")
+  activeLoan = must(await service.from("loans").select("id, status, start_date").eq("notes", ACTIVE_NOTE).single(), "activo QA")
+}
+const activeId = activeLoan!.id as string
+const qaLoanIds = [loanA, loanB, activeId, centLoan!.id as string]
+
+// Reinicio idempotente: se ANULAN (no se borran) las clasificaciones y gastos QA de corridas anteriores.
+for (const w of must(await service.from("loan_writeoffs").select("id").is("voided_at", null).in("loan_id", qaLoanIds), "writeoffs previos")) {
+  must(await admin.rpc("void_writeoff", { p_writeoff_id: w.id, p_reason: "QA: reinicio de la prueba" }), "reinicio writeoff")
+}
+for (const e of must(await service.from("expenses").select("id").is("voided_at", null).like("description", "QA FIN%"), "gastos previos")) {
+  must(await admin.rpc("void_expense", { p_expense_id: e.id, p_reason: "QA: reinicio de la prueba" }), "reinicio gasto")
+}
+
+const expense = (db: Db, category: string, amount: number, date: string, description: string | null) =>
+  db.rpc("register_expense", { p_category: category, p_amount: amount, p_description: description, p_expense_date: date })
+{
+  const r1 = await expense(cobrador, "sueldos", 100, "2020-03-10", "QA FIN cobrador")
+  check(`gasto: cobrador no puede registrar → "${r1.error?.message}"`, !!r1.error && /admin o supervisor/.test(r1.error.message))
+  const r2 = await expense(anon, "sueldos", 100, "2020-03-10", "QA FIN anon")
+  check("gasto: anon no puede registrar", !!r2.error)
+  const g1 = await expense(supervisor, "gasolina_transporte", 300, "2020-03-10", "QA FIN gasolina")
+  check("gasto: supervisor registra RD$300 de gasolina", !g1.error, g1.error?.message)
+  const g2 = await expense(admin, "sueldos", 1_000, "2020-03-20", "QA FIN sueldo")
+  check("gasto: admin registra RD$1,000 de sueldos", !g2.error, g2.error?.message)
+  const g3 = await expense(admin, "otros", 50, "2020-03-25", "QA FIN otro (se anula)")
+  check("gasto: admin registra RD$50 de otros", !g3.error, g3.error?.message)
+  const g3id = (g3.data as { id: string } | null)?.id ?? ""
+  const v1 = await supervisor.rpc("void_expense", { p_expense_id: g3id, p_reason: "QA: no debe poder" })
+  check(`gasto: supervisor NO puede anular → "${v1.error?.message}"`, !!v1.error && /Solo un admin/.test(v1.error.message))
+  const v0 = await admin.rpc("void_expense", { p_expense_id: g3id, p_reason: "  " })
+  check("gasto: anular sin motivo se rechaza", !!v0.error && /motivo/.test(v0.error.message))
+  const v2 = await admin.rpc("void_expense", { p_expense_id: g3id, p_reason: "QA: registrado por error" })
+  check("gasto: admin anula con motivo", !v2.error && !!(v2.data as { voided_at: string | null })?.voided_at, v2.error?.message)
+  const v3 = await admin.rpc("void_expense", { p_expense_id: g3id, p_reason: "QA: otra vez" })
+  check("gasto: no se anula dos veces", !!v3.error && /ya está anulado/.test(v3.error.message))
+  const bad = [
+    await expense(admin, "sueldos", 100, addDaysIso(today0, 1), "QA FIN futuro"),
+    await expense(admin, "otros", 100, "2020-03-10", null),
+    await expense(admin, "sueldos", 0, "2020-03-10", "QA FIN cero"),
+    await expense(admin, "sueldos", 10.555, "2020-03-10", "QA FIN decimales"),
+  ]
+  check(`gasto: se rechazan fecha futura, "Otros" sin descripción, monto 0 y 3 decimales → ${bad.map((b) => (b.error ? "✓" : "✗")).join("")}`, bad.every((b) => !!b.error))
+  const ins = await admin.from("expenses").insert({ category: "sueldos", amount: 1, expense_date: "2020-03-10", description: "QA FIN directo" })
+  check("gasto: nadie inserta directo en la tabla (solo por la función)", !!ins.error)
+  const upd = await admin.from("loan_writeoffs").update({ reason: "x" }).eq("loan_id", loanB).select("id")
+  check("clasificación: nadie modifica directo la tabla", !!upd.error || (upd.data ?? []).length === 0)
+  const sel = await cobrador.from("expenses").select("id").limit(1)
+  check("gasto: el cobrador no ve gastos (RLS)", (sel.data ?? []).length === 0)
+
+  type Ex = { id: string; amount: number; voided_at: string | null; void_reason: string | null; created_by_name: string }
+  const mine = new Set([g1, g2, g3].map((g) => (g.data as { id: string } | null)?.id))
+  const list = (await rpc<Ex[]>(admin, "finance_expenses", { p_from: "2020-03-01", p_to: "2020-03-31" })).filter((x) => mine.has(x.id))
+  check(`gastos de marzo 2020: 3 registrados (1 anulado), vigentes 1,300 → ${list.length} / ${sum(list.filter((e) => !e.voided_at), (e) => num(e.amount))}`,
+    list.length === 3 && sum(list.filter((e) => !e.voided_at), (e) => num(e.amount)) === 1_300)
+  const t0 = num(await rpc(admin, "finance_expenses_total", { p_date: "2020-02-29" }))
+  const t1 = num(await rpc(admin, "finance_expenses_total", { p_date: "2020-03-31" }))
+  check(`total de gastos hasta el 31/03/2020 − hasta el 29/02/2020 = 1,300 → ${t1 - t0}`, near(t1 - t0, 1_300))
+  const audit = must(await service.from("audit_logs").select("action").eq("entity", "expenses").eq("entity_id", (g2.data as { id: string }).id), "auditoría gasto")
+  check("gasto: queda en auditoría", audit.some((a) => a.action === "registrar_gasto"))
+  const cap = must(await service.from("capital_transactions").select("id").ilike("description", "%QA FIN%"), "capital QA")
+  check("gasto: no crea movimientos de Capital", cap.length === 0)
+}
+
+const classify = (db: Db, loan: string, kind: string, date: string, reason: string) =>
+  db.rpc("classify_loan", { p_loan_id: loan, p_kind: kind, p_reason: reason, p_writeoff_date: date })
+{
+  const s1 = await classify(supervisor, loanB, "incobrable", "2020-04-01", "QA FIN: no responde")
+  check(`clasificar: supervisor NO puede → "${s1.error?.message}"`, !!s1.error && /Solo un admin/.test(s1.error.message))
+  const s2 = await classify(admin, loanB, "incobrable", "2020-04-01", " ")
+  check("clasificar: sin motivo se rechaza", !!s2.error && /motivo/.test(s2.error.message))
+  const b = await classify(admin, loanB, "incobrable", "2020-04-01", "QA FIN: no responde")
+  const bw = b.data as { capital_lost: number; interest_lost: number } | null
+  check(`clasificar B incobrable: no recuperado 4,000 de capital y 400 de interés → ${bw?.capital_lost} / ${bw?.interest_lost}`,
+    !b.error && num(bw?.capital_lost) === 4_000 && num(bw?.interest_lost) === 400, b.error?.message)
+  const again = await classify(admin, loanB, "error", "2020-04-01", "QA FIN: otra vez")
+  check("clasificar: un préstamo no se clasifica dos veces", !!again.error && /ya está clasificado/.test(again.error.message))
+  const loanBRow = must(await service.from("loans").select("status, outstanding_principal").eq("id", loanB).single(), "B")
+  check("clasificar: el préstamo no cambia (sigue cancelado, mismo saldo)", loanBRow.status === "cancelado" && num(loanBRow.outstanding_principal) === 4_000)
+  const a = await classify(admin, loanA, "error", today0, "QA FIN: creado por error")
+  check("clasificar A como error", !a.error, a.error?.message)
+  const paid = await classify(admin, centLoan!.id, "incobrable", today0, "QA FIN: pagado")
+  check("clasificar: un préstamo pagado no se clasifica", !!paid.error && /pagado/.test(paid.error.message))
+
+  const e1 = await classify(admin, activeId, "error", "2021-07-01", "QA FIN: activo")
+  check("activo: solo se puede marcar incobrable", !!e1.error && /solo se puede marcar como incobrable/.test(e1.error.message))
+  const e2 = await classify(admin, activeId, "incobrable", "2021-04-01", "QA FIN: antes del inicio")
+  check("activo: no antes del inicio del préstamo", !!e2.error && /anterior al inicio/.test(e2.error.message))
+  const e3 = await classify(admin, activeId, "incobrable", addDaysIso(today0, 1), "QA FIN: futuro")
+  check("activo: no con fecha futura", !!e3.error && /futura/.test(e3.error.message))
+
+  const before = posTotal(await rpc<Pos[]>(admin, "finance_position", { p_date: "2021-06-30" }))
+  const lateBefore = await rpc<{ loan_id: string }[]>(admin, "finance_overdue_loans", { p_date: "2021-07-15" })
+  check("activo sin clasificar: está atrasado al 15/07/2021", lateBefore.some((r) => r.loan_id === activeId))
+  const w = await classify(admin, activeId, "incobrable", "2021-07-01", "QA FIN: no paga desde junio")
+  check("activo: admin lo marca incobrable el 01/07/2021", !w.error, w.error?.message)
+  const activeRow = must(await service.from("loans").select("status").eq("id", activeId).single(), "activo")
+  check("activo: sigue activo en la base (Dashboard/Capital/Cobros no cambian)", activeRow.status === "activo")
+  const stillIn = posTotal(await rpc<Pos[]>(admin, "finance_position", { p_date: "2021-06-30" }))
+  const out = posTotal(await rpc<Pos[]>(admin, "finance_position", { p_date: "2021-07-01" }))
+  check(`activo incobrable: cuenta en la cartera hasta el 30/06 y sale el 01/07 (−2,000, −1 préstamo) → ${stillIn.cap - out.cap} / ${stillIn.n - out.n}`,
+    stillIn.cap === before.cap && near(stillIn.cap - out.cap, 2_000) && stillIn.n - out.n === 1)
+  const lateAfter = await rpc<{ loan_id: string }[]>(admin, "finance_overdue_loans", { p_date: "2021-07-15" })
+  check("activo incobrable: ya no cuenta como atrasado", !lateAfter.some((r) => r.loan_id === activeId))
+  const wid = (w.data as { id: string }).id
+  const sv = await supervisor.rpc("void_writeoff", { p_writeoff_id: wid, p_reason: "QA: no debe poder" })
+  check("quitar clasificación: supervisor NO puede", !!sv.error && /Solo un admin/.test(sv.error.message))
+  must(await admin.rpc("void_writeoff", { p_writeoff_id: wid, p_reason: "QA: prueba de quitar" }), "quitar")
+  const back = posTotal(await rpc<Pos[]>(admin, "finance_position", { p_date: "2021-07-01" }))
+  check("quitar clasificación: vuelve a la cartera", near(back.cap, stillIn.cap) && back.n === stillIn.n)
+  must(await classify(admin, activeId, "incobrable", "2021-07-01", "QA FIN: no paga desde junio"), "volver a marcar")
+
+  type Wo = { id: string; loan_id: string; kind: string; loan_status: string }
+  const wo = await rpc<Wo[]>(admin, "finance_writeoffs", {})
+  check("finance_writeoffs: B incobrable, A error, activo incobrable",
+    wo.some((x) => x.loan_id === loanB && x.kind === "incobrable") && wo.some((x) => x.loan_id === loanA && x.kind === "error") &&
+    wo.some((x) => x.loan_id === activeId && x.kind === "incobrable" && x.loan_status === "activo"))
+  const wc = await cobrador.rpc("finance_writeoffs")
+  check("finance_writeoffs: el cobrador no puede", !!wc.error)
+
+  // Servicio: ganancia neta
+  const mar = await getFinanceDashboard(admin as never, resolvePeriod("rango", today0, { from: "2020-03-01", to: "2020-03-31" }), today0)
+  check(`marzo 2020: ganancia neta = 450 − 1,300 de gastos − 0 = −850 → ${mar.kpis.netProfit.current}`,
+    mar.kpis.netProfit.current === -850 && mar.expenses.total === 1_300 && mar.expenses.count === 2)
+  const apr = await getFinanceDashboard(admin as never, resolvePeriod("rango", today0, { from: "2020-04-01", to: "2020-04-30" }), today0)
+  check(`abril 2020: B incobrable en el período → pérdida 4,000, ganancia neta −4,000 → ${apr.losses.periodLoss} / ${apr.kpis.netProfit.current}`,
+    apr.losses.periodLoss === 4_000 && apr.kpis.netProfit.current === -4_000 && apr.losses.periodLossLoans === 1)
+  check("abril 2020: comparado con marzo (−850)", apr.kpis.netProfit.previous === -850)
+
+  // A queda "por clasificar" para probar el botón en pantalla.
+  const aw = wo.find((x) => x.loan_id === loanA)!
+  must(await admin.rpc("void_writeoff", { p_writeoff_id: aw.id, p_reason: "QA: dejar por clasificar para probar en pantalla" }), "A por clasificar")
+}
+
 // ===== Cuadres globales contra cálculo independiente =====
 console.log("\nC. Cuadres globales (toda la base de pruebas)")
 const today = todayRD()
@@ -253,17 +405,25 @@ const payments = must(await service.from("payments").select("*"), "payments")
 const installments = must(await service.from("installments").select("*"), "installments")
 const capTx = must(await service.from("capital_transactions").select("*"), "capital")
 const dm = must(await service.from("dashboard_metrics").select("*").single(), "dashboard")
-const notCancelled = new Set(loans.filter((l) => l.status !== "cancelado").map((l) => l.id))
-const active = loans.filter((l) => l.status === "activo")
+// Incobrables vigentes (fecha ≤ hoy): salen de la cartera de Finanzas, pero siguen "activos" en la base.
+const writtenOff = new Set(
+  must(await service.from("loan_writeoffs").select("loan_id, writeoff_date").is("voided_at", null).eq("kind", "incobrable"), "incobrables")
+    .filter((w) => w.writeoff_date <= today)
+    .map((w) => w.loan_id)
+)
+const notCancelled = new Set(loans.filter((l) => l.status !== "cancelado" && !writtenOff.has(l.id)).map((l) => l.id))
+const activeAll = loans.filter((l) => l.status === "activo")
+const active = activeAll.filter((l) => !writtenOff.has(l.id))
 {
   const p = posTotal(await rpc<Pos[]>(admin, "finance_position", { p_date: "infinity" }))
-  check(`capital en la calle (hoy) = Σ saldo de préstamos activos = dashboard (${num(dm.lent_capital)}) → ${p.cap}`,
-    near(p.cap, sum(active, (l) => num(l.outstanding_principal))) && near(p.cap, num(dm.lent_capital)))
+  const woCap = sum(activeAll.filter((l) => writtenOff.has(l.id)), (l) => num(l.outstanding_principal))
+  check(`capital en la calle (hoy) = Σ saldo de activos no incobrables = dashboard (${num(dm.lent_capital)}) − incobrables activos (${woCap}) → ${p.cap}`,
+    near(p.cap, sum(active, (l) => num(l.outstanding_principal))) && near(p.cap, num(dm.lent_capital) - woCap))
   check(`ganancia por cobrar (hoy) = Σ interés pendiente de activos → ${p.int}`, near(p.int, sum(active, (l) => num(l.outstanding_interest))))
   const lent = sum(loans.filter((l) => notCancelled.has(l.id)), (l) => num(l.principal_amount))
   const recovered = sum(payments.filter((x) => notCancelled.has(x.loan_id)), (x) => num(x.principal_applied))
   check(`capital en la calle + capital recuperado = total prestado (no cancelados): ${p.cap} + ${recovered} = ${lent}`, near(p.cap + recovered, lent))
-  check(`activos (hoy) = préstamos con estado activo (${active.length}) → ${p.n}`, p.n === active.length)
+  check(`activos (hoy) = préstamos activos no incobrables (${active.length}) → ${p.n}`, p.n === active.length)
 }
 {
   const cash = num(await rpc(admin, "finance_cash", { p_date: "infinity" }))
@@ -293,7 +453,7 @@ const year = resolvePeriod("anio", today)
   const loanById = new Map(loans.map((l) => [l.id, l]))
   const late = installments.filter((i) => {
     const l = loanById.get(i.loan_id)!
-    return l.status !== "cancelado" && l.start_date <= today && i.due_date < today && num(i.total_amount) - (paidByInst.get(i.id) ?? 0) > 0.01 // tolerancia de 1 centavo
+    return l.status !== "cancelado" && !writtenOff.has(l.id) && l.start_date <= today && i.due_date < today && num(i.total_amount) - (paidByInst.get(i.id) ?? 0) > 0.01 // tolerancia de 1 centavo
   })
   const lateLoans = new Set(late.map((i) => i.loan_id))
   const o = await rpc<{ loan_id: string; overdue_amount: number }[]>(admin, "finance_overdue_loans", { p_date: today })
@@ -313,7 +473,7 @@ const year = resolvePeriod("anio", today)
 {
   // Eficiencia del año, calculada aquí
   const loanById = new Map(loans.map((l) => [l.id, l]))
-  const due = installments.filter((i) => loanById.get(i.loan_id)!.status !== "cancelado" && i.due_date >= year.from && i.due_date <= year.to)
+  const due = installments.filter((i) => loanById.get(i.loan_id)!.status !== "cancelado" && !writtenOff.has(i.loan_id) && i.due_date >= year.from && i.due_date <= year.to)
   const paidUntil = (id: string) => sum(payments.filter((x) => x.installment_id === id && x.payment_date <= year.to), (x) => num(x.amount))
   const e = (await rpc<{ due_amount: number; collected_amount: number }[]>(admin, "finance_collection_efficiency", { p_from: year.from, p_to: year.to }))[0]
   check(`eficiencia del año: tocaba ${sum(due, (i) => num(i.total_amount))}, cobrado ${sum(due, (i) => Math.min(paidUntil(i.id), num(i.total_amount)))}`,
@@ -338,16 +498,20 @@ console.log("\nD. Servicio completo del panel (como lo usa la página)")
   check(`al día (${d.aging.current.currentLoans}) + con atraso (${d.aging.current.loans}) = préstamos en la calle hasta hoy (${untilToday.n})`,
     d.aging.current.currentLoans + d.aging.current.loans === untilToday.n)
 
-  // Cancelados: total = cálculo independiente desde los pagos
-  const cancelled = loans.filter((l) => l.status === "cancelado")
+  // Cancelados e incobrables: cálculo independiente
+  const wos = must(await service.from("loan_writeoffs").select("loan_id, kind, capital_lost, writeoff_date").is("voided_at", null), "writeoffs")
+  const classified = new Set(wos.map((w) => w.loan_id))
   const principalPaid = (id: string) => sum(payments.filter((x) => x.loan_id === id), (x) => num(x.principal_applied))
-  const lost = sum(cancelled, (l) => Math.max(num(l.principal_amount) - principalPaid(l.id), 0))
-  check(`cancelados en el panel: ${cancelled.length} préstamos, no recuperado ${lost} → ${d.cancelled.loans} / ${d.cancelled.capitalLost}`,
-    d.cancelled.loans === cancelled.length && near(d.cancelled.capitalLost, lost))
-  check("marzo 2020: todavía no había cancelados", d2.cancelled.loans === 0 && d2.cancelled.capitalLost === 0)
-  const d3 = await getFinanceDashboard(admin as never, resolvePeriod("rango", today, { from: "2020-04-01", to: "2020-04-30" }), today)
-  check(`abril 2020: B cancelado en el período, 4,000 no recuperado → ${d3.cancelled.periodLoans} / ${d3.cancelled.periodCapitalLost}`,
-    d3.cancelled.loans === 1 && d3.cancelled.periodLoans === 1 && d3.cancelled.periodCapitalLost === 4_000)
+  const pendingLoans = loans.filter((l) => l.status === "cancelado" && !classified.has(l.id))
+  const pendingAmount = sum(pendingLoans, (l) => Math.max(num(l.principal_amount) - principalPaid(l.id), 0))
+  const lossAmount = sum(wos.filter((w) => w.kind === "incobrable" && w.writeoff_date <= today), (w) => num(w.capital_lost))
+  check(`por clasificar: ${pendingLoans.length} cancelados, ${pendingAmount} → ${d.losses.pendingLoans} / ${d.losses.pending}`,
+    d.losses.pendingLoans === pendingLoans.length && near(d.losses.pending, pendingAmount))
+  check(`pérdida reconocida (incobrables) = ${lossAmount} → ${d.losses.loss}`, near(d.losses.loss, lossAmount))
+  check("marzo 2020: todavía no había cancelados ni incobrables", d2.losses.rows.length === 0 && d2.losses.loss === 0)
+  const allExpenses = must(await service.from("expenses").select("amount").is("voided_at", null), "gastos")
+  check(`caja después de gastos = caja − Σ gastos vigentes (${sum(allExpenses, (x) => num(x.amount))})`,
+    near(d.kpis.cashAfterExpenses.current, d.kpis.cash.current - sum(allExpenses, (x) => num(x.amount))))
 }
 
 console.log(`\nResultado: ${passed} OK, ${failed} fallas`)
