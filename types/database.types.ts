@@ -390,6 +390,102 @@ export interface Database {
         }
         Returns: unknown
       }
+      // ---- Migración 0013: Finanzas (solo lectura, solo admin/supervisor) ----
+      finance_position: {
+        Args: { p_date: string }
+        Returns: {
+          frequency: LoanFrequency
+          active_loans: number
+          capital_outstanding: number
+          interest_outstanding: number
+        }[]
+      }
+      finance_cash: {
+        Args: { p_date: string }
+        Returns: number
+      }
+      finance_flows: {
+        Args: { p_from: string; p_to: string }
+        Returns: {
+          frequency: LoanFrequency
+          interest_collected: number
+          principal_collected: number
+          operations: number
+          disbursed: number
+          new_loans: number
+          paid_loans: number
+          avg_capital: number
+        }[]
+      }
+      finance_collection_efficiency: {
+        Args: { p_from: string; p_to: string }
+        Returns: {
+          due_amount: number
+          collected_amount: number
+          installments_due: number
+          installments_paid: number
+        }[]
+      }
+      finance_monthly: {
+        Args: { p_to: string; p_months: number }
+        Returns: {
+          month_start: string
+          interest_collected: number
+          principal_collected: number
+          disbursed: number
+        }[]
+      }
+      finance_projection: {
+        Args: { p_date: string; p_weeks: number }
+        Returns: { bucket: number; installments: number; capital: number; interest: number }[]
+      }
+      finance_overdue_loans: {
+        Args: { p_date: string }
+        Returns: {
+          loan_id: string
+          loan_number: string
+          client_id: string
+          client_name: string
+          frequency: LoanFrequency
+          days_late: number
+          capital_at_risk: number
+          overdue_amount: number
+          overdue_installments: number
+        }[]
+      }
+      finance_by_user: {
+        Args: { p_from: string; p_to: string }
+        Returns: {
+          user_id: string | null
+          user_name: string
+          operations: number
+          collected: number
+          principal: number
+          interest: number
+        }[]
+      }
+      finance_top_clients: {
+        Args: { p_from: string; p_to: string; p_limit: number }
+        Returns: { client_id: string; client_name: string; interest: number; principal: number; loans: number }[]
+      }
+      finance_cancelled_loans: {
+        Args: Record<string, never>
+        Returns: {
+          loan_id: string
+          loan_number: string
+          client_id: string
+          client_name: string
+          frequency: LoanFrequency
+          start_date: string
+          cancelled_on: string
+          principal_amount: number
+          principal_collected: number
+          interest_collected: number
+          payments: number
+          capital_lost: number
+          notes: string | null
+        }[]
+      }
       register_payment: {
         Args: {
           p_loan_id: string
