@@ -25,6 +25,15 @@ export type LoanScheduleType = "interval" | "fixed_days"
 export type WhatsappConversationStatus = "pendiente" | "atendida" | "cerrada"
 export type WhatsappMessageSender = "cliente" | "agente" | "bot"
 export type ReceiptStatus = "activo" | "anulado"
+export type ExpenseCategory =
+  | "gasolina_transporte"
+  | "telefono_internet"
+  | "papeleria_impresion"
+  | "sueldos"
+  | "comisiones"
+  | "alquiler"
+  | "otros"
+export type WriteoffKind = "incobrable" | "error"
 
 export interface Database {
   public: {
@@ -326,6 +335,42 @@ export interface Database {
         Update: Record<string, never>
         Relationships: []
       }
+      expenses: {
+        Row: {
+          id: string
+          expense_date: string
+          category: ExpenseCategory
+          amount: number
+          description: string | null
+          created_by: string | null
+          created_at: string
+          voided_at: string | null
+          voided_by: string | null
+          void_reason: string | null
+        }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
+      loan_writeoffs: {
+        Row: {
+          id: string
+          loan_id: string
+          kind: WriteoffKind
+          writeoff_date: string
+          reason: string
+          capital_lost: number
+          interest_lost: number
+          created_by: string | null
+          created_at: string
+          voided_at: string | null
+          voided_by: string | null
+          void_reason: string | null
+        }
+        Insert: Record<string, never>
+        Update: Record<string, never>
+        Relationships: []
+      }
     }
     Views: {
       client_summary: {
@@ -390,6 +435,102 @@ export interface Database {
         }
         Returns: unknown
       }
+      // ---- Migración 0013: Finanzas (solo lectura, solo admin/supervisor) ----
+      finance_position: {
+        Args: { p_date: string }
+        Returns: {
+          frequency: LoanFrequency
+          active_loans: number
+          capital_outstanding: number
+          interest_outstanding: number
+        }[]
+      }
+      finance_cash: {
+        Args: { p_date: string }
+        Returns: number
+      }
+      finance_flows: {
+        Args: { p_from: string; p_to: string }
+        Returns: {
+          frequency: LoanFrequency
+          interest_collected: number
+          principal_collected: number
+          operations: number
+          disbursed: number
+          new_loans: number
+          paid_loans: number
+          avg_capital: number
+        }[]
+      }
+      finance_collection_efficiency: {
+        Args: { p_from: string; p_to: string }
+        Returns: {
+          due_amount: number
+          collected_amount: number
+          installments_due: number
+          installments_paid: number
+        }[]
+      }
+      finance_monthly: {
+        Args: { p_to: string; p_months: number }
+        Returns: {
+          month_start: string
+          interest_collected: number
+          principal_collected: number
+          disbursed: number
+        }[]
+      }
+      finance_projection: {
+        Args: { p_date: string; p_weeks: number }
+        Returns: { bucket: number; installments: number; capital: number; interest: number }[]
+      }
+      finance_overdue_loans: {
+        Args: { p_date: string }
+        Returns: {
+          loan_id: string
+          loan_number: string
+          client_id: string
+          client_name: string
+          frequency: LoanFrequency
+          days_late: number
+          capital_at_risk: number
+          overdue_amount: number
+          overdue_installments: number
+        }[]
+      }
+      finance_by_user: {
+        Args: { p_from: string; p_to: string }
+        Returns: {
+          user_id: string | null
+          user_name: string
+          operations: number
+          collected: number
+          principal: number
+          interest: number
+        }[]
+      }
+      finance_top_clients: {
+        Args: { p_from: string; p_to: string; p_limit: number }
+        Returns: { client_id: string; client_name: string; interest: number; principal: number; loans: number }[]
+      }
+      finance_cancelled_loans: {
+        Args: Record<string, never>
+        Returns: {
+          loan_id: string
+          loan_number: string
+          client_id: string
+          client_name: string
+          frequency: LoanFrequency
+          start_date: string
+          cancelled_on: string
+          principal_amount: number
+          principal_collected: number
+          interest_collected: number
+          payments: number
+          capital_lost: number
+          notes: string | null
+        }[]
+      }
       register_payment: {
         Args: {
           p_loan_id: string
@@ -423,6 +564,63 @@ export interface Database {
           p_reason: string
         }
         Returns: Database["public"]["Tables"]["receipts"]["Row"]
+      }
+      register_expense: {
+        Args: {
+          p_category: ExpenseCategory
+          p_amount: number
+          p_description: string | null
+          p_expense_date: string
+        }
+        Returns: Database["public"]["Tables"]["expenses"]["Row"]
+      }
+      void_expense: {
+        Args: { p_expense_id: string; p_reason: string }
+        Returns: Database["public"]["Tables"]["expenses"]["Row"]
+      }
+      classify_loan: {
+        Args: { p_loan_id: string; p_kind: WriteoffKind; p_reason: string; p_writeoff_date: string }
+        Returns: Database["public"]["Tables"]["loan_writeoffs"]["Row"]
+      }
+      void_writeoff: {
+        Args: { p_writeoff_id: string; p_reason: string }
+        Returns: Database["public"]["Tables"]["loan_writeoffs"]["Row"]
+      }
+      finance_expenses: {
+        Args: { p_from: string; p_to: string }
+        Returns: {
+          id: string
+          expense_date: string
+          category: ExpenseCategory
+          amount: number
+          description: string | null
+          created_by_name: string
+          created_at: string
+          voided_at: string | null
+          voided_by_name: string | null
+          void_reason: string | null
+        }[]
+      }
+      finance_expenses_total: {
+        Args: { p_date: string }
+        Returns: number
+      }
+      finance_writeoffs: {
+        Args: Record<string, never>
+        Returns: {
+          id: string
+          loan_id: string
+          loan_number: string
+          client_id: string
+          client_name: string
+          loan_status: LoanStatus
+          kind: WriteoffKind
+          writeoff_date: string
+          reason: string
+          capital_lost: number
+          interest_lost: number
+          created_by_name: string
+        }[]
       }
     }
   }

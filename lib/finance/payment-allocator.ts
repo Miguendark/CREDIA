@@ -62,3 +62,22 @@ export function allocatePayment(
 
   return { allocations, unallocatedAmount: Math.max(remainingToAllocate, 0) }
 }
+
+/** La base marca "pagada" una cuota si le queda RD$0.01 o menos (register_payment). */
+export const CENT_TOLERANCE = 0.01
+
+/**
+ * Si el monto deja a una cuota con 1 centavo (o menos) pendiente, la base la
+ * dará por pagada y el préstamo quedará con ese centavo de saldo para
+ * siempre (caso PR-00017). Devuelve cuánto falta para cobrarla exacta, o
+ * null si no pasa. Solo mira la última cuota que toca el pago: las
+ * anteriores se cubren completas.
+ */
+export function centShortfall(result: AllocationResult, targetInstallments: AllocatableInstallment[]): number | null {
+  const last = result.allocations[result.allocations.length - 1]
+  if (!last) return null
+  const installment = targetInstallments.find((i) => i.id === last.installmentId)
+  if (!installment) return null
+  const left = round2(installment.remainingAmount - last.amount)
+  return left > 0 && left <= CENT_TOLERANCE ? left : null
+}
