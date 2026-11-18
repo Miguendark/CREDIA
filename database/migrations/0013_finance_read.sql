@@ -36,6 +36,8 @@
 --
 -- Reversa: 0013_down.sql
 
+begin;
+
 -- =========================================================================
 -- Helpers
 -- =========================================================================
@@ -644,3 +646,5 @@ grant execute on function public.finance_overdue_loans(date) to authenticated;
 grant execute on function public.finance_by_user(date, date) to authenticated;
 grant execute on function public.finance_top_clients(date, date, integer) to authenticated;
 grant execute on function public.finance_cancelled_loans() to authenticated;
+
+commit;
